@@ -30,6 +30,18 @@ const VERIFY_SYSTEM_PROMPT = `你是旅行规划质量审核员。给定用户�
 - 仅当 missing_spots 或 incorrect_spots 中存在影响计划主体的严重问题时，needs_regeneration=true；否则即便 passed=false，也可设 false（避免无谓重试）。
 - 不要编造问题。如果计划没有问题，直接 {"passed": true, "missing_spots": [], "incorrect_spots": [], "warnings": [], "needs_regeneration": false}。`;
 
+function unknownVerification(reason) {
+  return {
+    status: 'unknown',
+    passed: false,
+    missing_spots: [],
+    incorrect_spots: [],
+    warnings: [`AI 内容审核未完成：${reason}；这不代表计划已通过确定性校验。`],
+    needs_regeneration: false,
+    skipped: true,
+  };
+}
+
 function buildPlanSummary(plan) {
   return {
     city: plan.city,
@@ -58,13 +70,15 @@ function buildPlanSummary(plan) {
 export async function verifyPlan(userQuery, plan) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false };
+    return unknownVerification('未配置 DeepSeek API');
   }
 
   const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
   const userMsg = `【用户原始需求】\n${userQuery}\n\n【已生成的旅行计划】\n${JSON.stringify(buildPlanSummary(plan), null, 2)}`;
 
   let response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
   try {
     response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -72,6 +86,7 @@ export async function verifyPlan(userQuery, plan) {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
+      signal: controller.signal,
       body: JSON.stringify({
         model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
         messages: [
@@ -85,17 +100,19 @@ export async function verifyPlan(userQuery, plan) {
     });
   } catch (err) {
     console.warn('[Verify] 调用失败，跳过校验:', err.message);
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification(err.name === 'AbortError' ? '请求超时' : '服务不可用');
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!response.ok) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification(`服务返回 HTTP ${response.status}`);
   }
 
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification('审核模型未返回内容');
   }
 
   let parsed;
@@ -108,10 +125,11 @@ export async function verifyPlan(userQuery, plan) {
     }
   }
   if (!parsed) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification('审核输出不是合法 JSON');
   }
 
   return {
+    status: parsed.passed === false ? 'failed' : 'passed',
     passed: parsed.passed !== false,
     missing_spots: Array.isArray(parsed.missing_spots) ? parsed.missing_spots : [],
     incorrect_spots: Array.isArray(parsed.incorrect_spots) ? parsed.incorrect_spots : [],

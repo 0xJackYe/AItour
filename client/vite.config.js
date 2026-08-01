@@ -9,7 +9,11 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     define: {
-      'import.meta.env.VITE_GOOGLE_MAPS_API_KEY': JSON.stringify(env.GOOGLE_MAPS_API_KEY || ''),
+      // 浏览器 Key 必须单独配置并设置 HTTP referrer 限制，绝不回退到服务端 Key。
+      'import.meta.env.VITE_GOOGLE_MAPS_API_KEY': JSON.stringify(
+        env.VITE_GOOGLE_MAPS_API_KEY || '',
+      ),
+      'import.meta.env.VITE_GOOGLE_MAP_ID': JSON.stringify(env.VITE_GOOGLE_MAP_ID || ''),
     },
     server: {
       port: 5173,

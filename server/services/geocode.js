@@ -5,6 +5,19 @@ const VIEWPORT_PADDING_RATIO = 0.03;
 
 console.log('[Geocode] 模块加载: Google Places + Geocoding 严格城市消歧');
 
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function run() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
+  return results;
+}
+
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
   const toRad = value => (value * Math.PI) / 180;
@@ -170,7 +183,9 @@ export async function geocodeCity(city, country = '') {
 }
 
 export function isInTargetCity(place, cityContext) {
-  if (!cityContext || !place?.location) return true;
+  // 有城市硬约束时，无法建立城市锚点必须 fail-closed。
+  // 否则 Places 的全球同名候选会被错当成目标城市地点。
+  if (!cityContext || !place?.location) return false;
   const candidateCountry = placeCountryCode(place);
   if (cityContext.countryCode && candidateCountry && candidateCountry !== cityContext.countryCode) {
     return false;
@@ -239,8 +254,9 @@ async function findPlace(query, city, country, cityContext) {
   const fullQuery = [query, city, country].filter(Boolean).join(', ');
   const languageCode = /[\u3400-\u9fff]/u.test(query) ? 'zh-CN' : 'en';
   const restrictedPlaces = await searchRestricted(fullQuery, cityContext, languageCode);
+  const belongsToTarget = place => city ? isInTargetCity(place, cityContext) : Boolean(place?.location);
   const restrictedMatch = restrictedPlaces.find(place =>
-    isInTargetCity(place, cityContext) && placeNameMatches(place, query, city, country),
+    belongsToTarget(place) && placeNameMatches(place, query, city, country),
   );
   if (restrictedMatch) {
     return { coordinates: placeToCoordinates(restrictedMatch), place: restrictedMatch, status: 'verified' };
@@ -257,7 +273,7 @@ async function findPlace(query, city, country, cityContext) {
       languageCode,
     });
     const diagnosticMatch = diagnosticPlaces.find(place =>
-      isInTargetCity(place, cityContext) && placeNameMatches(place, query, city, country),
+      belongsToTarget(place) && placeNameMatches(place, query, city, country),
     );
     if (diagnosticMatch) {
       return { coordinates: placeToCoordinates(diagnosticMatch), place: diagnosticMatch, status: 'verified' };
@@ -272,7 +288,7 @@ async function findPlace(query, city, country, cityContext) {
     };
   }
 
-  const sameCityWrongName = diagnosticPlaces.find(place => isInTargetCity(place, cityContext));
+  const sameCityWrongName = diagnosticPlaces.find(place => belongsToTarget(place));
   if (sameCityWrongName) {
     return {
       coordinates: null,
@@ -390,7 +406,7 @@ export async function geocodeAllSpots(plan) {
         spotIndex,
         city,
         country,
-        promise: locateSpot(spot, city, country, cityContext),
+        cityContext,
       };
     });
   });
@@ -405,15 +421,20 @@ export async function geocodeAllSpots(plan) {
       accommodation,
       city,
       country,
-      promise: accommodation.landmark
-        ? findPlace(accommodation.landmark, city, country, context)
-        : Promise.resolve({ coordinates: null, status: 'not_found', reason: '没有住宿地标' }),
+      context,
     };
   });
 
   const [spotResults, accommodationResults] = await Promise.all([
-    Promise.all(spotJobs.map(job => job.promise)),
-    Promise.all(accommodationJobs.map(job => job.promise)),
+    mapWithConcurrency(spotJobs, 8, job => locateSpot(
+      job.spot,
+      job.city,
+      job.country,
+      job.cityContext,
+    )),
+    mapWithConcurrency(accommodationJobs, 4, job => job.accommodation.landmark
+      ? findPlace(job.accommodation.landmark, job.city, job.country, job.context)
+      : Promise.resolve({ coordinates: null, status: 'not_found', reason: '没有住宿地标' })),
   ]);
   const spotResultByKey = new Map();
   let geocodedCount = 0;
@@ -460,14 +481,16 @@ export async function geocodeAllSpots(plan) {
 
   const enrichedDailyPlans = (plan.daily_plans || []).map((day, dayIndex) => ({
     ...day,
-    spots: (day.spots || []).flatMap((spot, spotIndex) => {
+    spots: (day.spots || []).map((spot, spotIndex) => {
       const result = spotResultByKey.get(spotLocationKey(dayIndex, spotIndex));
-      if (result?.status === 'outside_target' || result?.status === 'name_mismatch') return [];
-      return [{
+      const rejected = result?.status === 'outside_target' || result?.status === 'name_mismatch';
+      return {
         ...spot,
         location_id: spotLocationKey(dayIndex, spotIndex),
-        coordinates: result?.coordinates || null,
-      }];
+        coordinates: rejected ? null : result?.coordinates || null,
+        location_status: rejected ? 'rejected' : result?.coordinates ? 'verified' : 'unverified',
+        location_issue: rejected ? result?.reason || '地点未通过城市与名称校验' : null,
+      };
     }),
   }));
 

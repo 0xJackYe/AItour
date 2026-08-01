@@ -50,3 +50,7 @@ test('英文官方名的常见词形差异仍可正确匹配', () => {
   const basilica = { displayName: { text: "St. Mark's Basilica" } };
   assert.equal(placeNameMatches(basilica, "Saint Mark's Basilica, Venice", 'Venice', 'Italy'), true);
 });
+
+test('城市锚点缺失时必须拒绝未验证的全球同名候选', () => {
+  assert.equal(isInTargetCity(place(35.7, 139.7), null), false);
+});

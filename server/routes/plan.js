@@ -1,9 +1,16 @@
 import { Router } from 'express';
 import { callLLM } from '../services/llm.js';
 import { geocodeAllSpots } from '../services/geocode.js';
-import { getRouteGeometry } from '../services/route.js';
+import { getRouteForLegWithFallback } from '../services/route.js';
 import { findNearbyTransit } from '../services/transit.js';
 import { verifyPlan, buildRegenFeedback } from '../services/verify.js';
+import { normalizeProfile, profileClarificationQuestions } from '../services/preferences.js';
+import {
+  applyLegRoutes,
+  buildExecutableItinerary,
+  flattenRoutes,
+} from '../services/itinerary.js';
+import { validatePlanHealth } from '../services/health.js';
 
 const router = Router();
 
@@ -20,67 +27,131 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
+export function preparePlanRequest(body = {}) {
+  if (!body || typeof body !== 'object' || typeof body.query !== 'string' || !body.query.trim()) {
+    return { error: '请输入旅行需求' };
+  }
+  const query = body.query.trim();
+  if (query.length > 12000) return { error: '旅行需求过长，请精简到 12000 字以内' };
+  const profile = normalizeProfile(body.profile, query);
+  return { query, profile, questions: profileClarificationQuestions(profile) };
+}
+
+function structuredLlmQuestions(questions = []) {
+  return questions.map((question, index) => ({
+    id: `llm_clarification_${index + 1}`,
+    label: String(question),
+    type: 'text',
+    required: true,
+  }));
+}
+
+export async function calculatePlanRoutes(plan, { routeProvider } = {}) {
+  const dayLegJobs = (plan.daily_plans || []).flatMap(day => {
+    const nodeMap = new Map((day.nodes || []).map(node => [node.id, node]));
+    return (day.legs || []).map(leg => ({
+      kind: 'leg',
+      day,
+      leg,
+      from: nodeMap.get(leg.from_node_id),
+      to: nodeMap.get(leg.to_node_id),
+    }));
+  });
+
+  const connectionJobs = (plan.daily_plans || []).flatMap((day, index, days) => {
+    const connection = day.connection_to_next;
+    const next = days[index + 1];
+    if (!connection || connection.type !== 'intercity' || !next) return [];
+    return [{
+      kind: 'connection',
+      day,
+      leg: connection,
+      from: (day.nodes || []).find(node => node.id === connection.from_node_id),
+      to: (next.nodes || []).find(node => node.id === connection.to_node_id),
+    }];
+  });
+  const jobs = [...dayLegJobs, ...connectionJobs];
+
+  const results = await mapWithConcurrency(jobs, 6, async (job) => {
+    const route = await getRouteForLegWithFallback(job.from, job.to, job.leg.mode, {
+      departureTime: job.leg.departure_time,
+      routeProvider,
+      allowedModes: plan.profile?.transport?.allowedModes,
+      avoidModes: plan.profile?.transport?.avoidModes,
+      maxWalkingKm: plan.profile?.maxWalkingKm,
+    });
+    return [job.leg.id, route];
+  });
+  const routeResults = new Map(results);
+  return applyLegRoutes(plan, routeResults, plan.profile || {});
+}
+
+function parsedRequest(plan, profile) {
+  return {
+    city: plan.city || null,
+    country: plan.country || null,
+    days: plan.days || null,
+    start_date: profile.startDate,
+    destinations: plan.destinations || [],
+    preferences: {
+      ...(plan.preferences || {}),
+      pace: profile.pace,
+      budget: profile.budget,
+      transport: profile.transport,
+      maxWalkingKm: profile.maxWalkingKm,
+      interests: profile.interests,
+    },
+    constraints: profile,
+  };
+}
+
 router.post('/plan', async (req, res) => {
+  const prepared = preparePlanRequest(req.body);
+  if (prepared.error) return res.status(400).json({ error: prepared.error });
+  if (prepared.questions.length) {
+    return res.json({
+      status: 'need_clarification',
+      questions: prepared.questions,
+      profile: prepared.profile,
+    });
+  }
+
   try {
-    const { query } = req.body;
-    if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      return res.status(400).json({ error: '请输入旅行需求' });
-    }
+    const { query: userQuery, profile } = prepared;
+    console.log(`[Plan] 收到 ${profile.days} 天规划请求`);
 
-    const userQuery = query.trim();
-    console.log(`[Plan] 收到请求: "${userQuery.substring(0, 80)}..."`);
-
-    // ───── Step 1. 首次生成 ─────
-    console.log('[Plan] 调用 DeepSeek...');
-    const llmResult = await callLLM(userQuery);
-
+    let llmResult = await callLLM(userQuery, null, profile);
     if (llmResult.status === 'need_clarification') {
       return res.json({
         status: 'need_clarification',
-        questions: llmResult.clarification_questions || ['请提供更多旅行信息，比如目的地、天数、想去的地方。'],
+        questions: structuredLlmQuestions(llmResult.clarification_questions || ['请补充目的地和出发地。']),
+        profile,
       });
     }
-
     let plan = llmResult.plan;
-    if (!plan) {
-      return res.status(500).json({ error: 'LLM 未返回有效计划' });
-    }
+    if (!plan) return res.status(502).json({ error: 'AI 未返回有效计划', code: 'LLM_PLAN_MISSING' });
 
-    // ───── Step 2. 自审：覆盖度 + 准确性 ─────
-    console.log('[Plan] LLM 自审中...');
+    // LLM 审核只负责内容覆盖度；最终通过与否由路线后的确定性 health 判定。
     let verification = await verifyPlan(userQuery, plan);
-
-    // ───── Step 3. 必要时重生成一次（仅一次，避免无限循环）─────
     if (verification.needs_regeneration) {
-      console.log('[Plan] 自审发现严重问题，重生成中...');
-      console.log('[Plan] 反馈:', JSON.stringify({
-        missing: verification.missing_spots,
-        incorrect: verification.incorrect_spots,
-      }));
       try {
-        const feedback = buildRegenFeedback(verification);
-        const retry = await callLLM(userQuery, feedback);
+        const retry = await callLLM(userQuery, buildRegenFeedback(verification), profile);
         if (retry.plan) {
           plan = retry.plan;
           verification = await verifyPlan(userQuery, plan);
           verification.regenerated = true;
         }
-      } catch (err) {
-        console.warn('[Plan] 重生成失败，沿用首版计划:', err.message);
+      } catch (error) {
+        verification.warnings = [...(verification.warnings || []), `AI 局部修正失败：${error.message}`];
       }
     }
 
-    // ───── Step 4. 地理编码（逐日城市硬约束 + 外地同名点剔除）─────
-    console.log('[Plan] 地理编码中...');
     const geocoding = await geocodeAllSpots(plan);
-    const enrichedPlan = geocoding.plan;
-    const geocodingWarnings = geocoding.warnings;
-
-    if (geocoding.rejectedSpots.length > 0) {
+    if (geocoding.rejectedSpots.length) {
       verification = {
         ...verification,
+        status: 'failed',
         passed: false,
-        needs_regeneration: false,
         geocoding_filtered: true,
         incorrect_spots: [
           ...(verification.incorrect_spots || []),
@@ -92,57 +163,67 @@ router.post('/plan', async (req, res) => {
       };
     }
 
-    // ───── Step 5. 交通点位 + 路线 ─────
+    let executablePlan = buildExecutableItinerary(geocoding.plan, profile);
+    executablePlan = await calculatePlanRoutes(executablePlan);
+    const health = validatePlanHealth(executablePlan, profile);
+    verification.deterministic_status = health.status;
+
     const transitMarkers = await findNearbyTransit(
-      enrichedPlan,
-      enrichedPlan.accommodation?.coordinates || null,
+      executablePlan,
+      executablePlan.accommodation?.coordinates || null,
     );
+    const routes = flattenRoutes(executablePlan);
 
-    const routes = await mapWithConcurrency(enrichedPlan.daily_plans || [], 4, async (day) => {
-      const points = (day.spots || [])
-        .filter(s => s.coordinates)
-        .map(s => [s.coordinates.lat, s.coordinates.lng]);
-
-      const routeData = await getRouteGeometry(points);
-      return {
-        day: day.day,
-        provider: 'google',
-        travel_mode: routeData?.travel_mode || 'WALK',
-        points,
-        geometry: routeData?.coordinates || points,
-        distance_meters: routeData?.distance_meters ?? null,
-        duration_seconds: routeData?.duration_seconds ?? null,
-      };
-    });
-
-    console.log(
-      `[Plan] 完成! 编码 ${geocoding.geocodedCount} 个地点, 校验 ${verification.passed ? '通过' : '存在问题'}, 编码警告 ${geocodingWarnings.length} 条`,
-    );
-
-    res.json({
+    return res.json({
       status: 'success',
-      parsed_request: {
-        city: enrichedPlan.city || null,
-        country: enrichedPlan.country || null,
-        days: enrichedPlan.days || null,
-        destinations: enrichedPlan.destinations || [],
-        preferences: enrichedPlan.preferences || null,
-        constraints: {
-          pace: enrichedPlan.preferences?.pace || null,
-          budget: enrichedPlan.preferences?.budget || null,
-        },
-      },
-      plan: enrichedPlan,
+      plan: executablePlan,
       routes,
-      transit_markers: transitMarkers,
+      health,
+      parsed_request: parsedRequest(executablePlan, profile),
       verification,
-      geocoding_warnings: geocodingWarnings,
+      geocoding_warnings: geocoding.warnings,
       geocoded_count: geocoding.geocodedCount,
+      transit_markers: transitMarkers,
+      profile,
       map_provider: 'google',
     });
-  } catch (err) {
-    console.error('[Plan] 错误:', err);
-    res.status(500).json({ error: err.message || '服务器内部错误' });
+  } catch (error) {
+    console.error('[Plan] 生成失败:', error);
+    return res.status(500).json({ error: '旅行计划生成失败，请稍后重试', code: error.code || 'PLAN_GENERATION_FAILED' });
+  }
+});
+
+router.post('/plan/recalculate', async (req, res) => {
+  try {
+    const sourcePlan = req.body?.plan;
+    if (!sourcePlan || typeof sourcePlan !== 'object' || !Array.isArray(sourcePlan.daily_plans)) {
+      return res.status(400).json({ error: '请提供需要重算的有效 plan' });
+    }
+    const profile = normalizeProfile(req.body?.profile || sourcePlan.profile || {}, req.body?.query || '');
+    const questions = profileClarificationQuestions(profile);
+    if (questions.length) return res.json({ status: 'need_clarification', questions, profile });
+
+    let plan = buildExecutableItinerary(sourcePlan, profile);
+    plan = await calculatePlanRoutes(plan);
+    const health = validatePlanHealth(plan, profile);
+    return res.json({
+      status: 'success',
+      plan,
+      routes: flattenRoutes(plan),
+      health,
+      profile,
+      parsed_request: parsedRequest(plan, profile),
+      verification: {
+        status: 'unknown',
+        passed: false,
+        skipped: true,
+        deterministic_status: health.status,
+        warnings: ['编辑后已重新执行路线、时间轴、预算与健康检查；AI 内容覆盖复核需在重新生成完整计划时执行。'],
+      },
+    });
+  } catch (error) {
+    console.error('[Plan] 重算失败:', error);
+    return res.status(500).json({ error: '行程重算失败', code: error.code || 'PLAN_RECALCULATION_FAILED' });
   }
 });
 
