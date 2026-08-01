@@ -64,20 +64,76 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 
 .app-body { position: relative; display: flex; flex: 1; min-height: 0; overflow: hidden; }
 .left-panel {
-  flex: 0 0 44%;
-  width: 44%;
-  min-width: 440px;
-  max-width: 720px;
+  flex: 0 0 var(--left-pane-width, 44%);
+  width: var(--left-pane-width, 44%);
+  min-width: 360px;
+  max-width: none;
   overflow-y: auto;
   overscroll-behavior: contain;
-  border-right: 1px solid var(--border);
   background: #fff;
   scrollbar-gutter: stable;
 }
-.map-container { flex: 1 1 56%; min-width: 0; position: relative; background: #e8eaed; }
+.panel-resizer {
+  position: relative;
+  z-index: 30;
+  flex: 0 0 10px;
+  width: 10px;
+  border: 0;
+  background: #fff;
+  cursor: col-resize;
+  touch-action: none;
+}
+.panel-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+  transition: width .15s, background .15s;
+}
+.panel-resizer::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: #cbd5e1;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, .92);
+  transition: background .15s, height .15s;
+}
+.panel-resizer:hover::before,
+.panel-resizer:focus-visible::before,
+.panel-resizer.is-dragging::before { width: 3px; background: var(--primary); }
+.panel-resizer:hover::after,
+.panel-resizer:focus-visible::after,
+.panel-resizer.is-dragging::after { height: 56px; background: var(--primary); }
+.panel-resizer:focus-visible { outline: 3px solid rgba(37, 99, 235, .25); outline-offset: -3px; }
+.app-body:has(.panel-resizer.is-dragging) { cursor: col-resize; user-select: none; }
+.map-container { flex: 1 1 auto; min-width: 360px; position: relative; background: #e8eaed; }
 
 /* Input and progressive profile */
 .input-panel { padding: 18px; border-bottom: 1px solid var(--border); background: #fff; }
+.form-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+.form-toolbar > div:first-child strong, .form-toolbar > div:first-child span { display: block; }
+.form-toolbar > div:first-child strong { font-size: 13px; }
+.form-toolbar > div:first-child span { margin-top: 2px; color: var(--text-secondary); font-size: 10px; }
+.clear-form-button,
+.clear-confirmation button {
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.clear-form-button:hover:not(:disabled) { border-color: #fda29b; color: var(--danger); }
+.clear-confirmation { display: flex; align-items: center; gap: 5px; color: var(--danger); font-size: 10px; }
+.clear-confirmation .clear-confirm-button { border-color: #fda29b; background: #fef3f2; color: var(--danger); }
 .input-panel form > textarea,
 .profile-field input,
 .profile-field select,
@@ -323,7 +379,6 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .google-map-root { position: relative; background: #e8eaed; }
 .map-loading, .map-error { position: absolute; top: 16px; left: 50%; z-index: 10; max-width: calc(100% - 32px); transform: translateX(-50%); padding: 9px 14px; border-radius: 8px; background: #fff; box-shadow: var(--shadow); font-size: 12px; }
 .map-error { color: var(--danger); }
-.google-provider-badge { position: absolute; top: 12px; left: 12px; z-index: 5; padding: 6px 10px; border-radius: 18px; background: rgba(255,255,255,.94); box-shadow: 0 1px 4px rgba(60,64,67,.3); color: #3c4043; font-size: 10px; font-weight: 700; pointer-events: none; }
 .google-info-window { max-width: 260px; color: #202124; font-family: Arial, sans-serif; font-size: 12px; line-height: 1.45; }
 .google-info-window strong { display: block; margin-bottom: 5px; font-size: 14px; }
 .google-info-window div { margin-top: 3px; color: #5f6368; }
@@ -333,8 +388,6 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
 .left-panel::-webkit-scrollbar-thumb, .history-list::-webkit-scrollbar-thumb, .journey-rail::-webkit-scrollbar-thumb, .day-navigator::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }
 
 @media (max-width: 980px) and (min-width: 769px) {
-  .left-panel { flex-basis: 50%; width: 50%; min-width: 390px; }
-  .map-container { flex-basis: 50%; }
   .budget-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -345,9 +398,11 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
   .header-action { min-width: 40px; padding: 6px 8px; font-size: 11px; }
   .history-toggle { min-height: 40px; padding: 7px 10px; }
   .app-body { display: block; }
-  .map-container { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .panel-resizer { display: none; }
+  .map-container { position: absolute; inset: 0; width: 100%; min-width: 0; height: 100%; }
   .left-panel {
     position: absolute;
+    flex: none;
     z-index: 100;
     left: 0;
     right: 0;
@@ -377,10 +432,11 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: no
   .node-actions { padding-left: 88px; }
   .timeline-leg { width: calc(100% - 56px); margin-left: 56px; padding-left: 45px; }
   .history-panel { inset: 0; width: 100%; border: 0; }
-  .google-provider-badge { top: 8px; left: 8px; }
 }
 
 @media (max-width: 420px) {
+  .form-toolbar { align-items: flex-start; flex-direction: column; }
+  .form-toolbar > .clear-form-button, .clear-confirmation { align-self: flex-end; }
   .profile-grid, .essentials-grid, .budget-grid { grid-template-columns: 1fr; }
   .profile-field-wide { grid-column: auto; }
   .travelers-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }

@@ -1,22 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import TripProfileForm from './TripProfileForm.jsx';
-
-export const DEFAULT_PROFILE = {
-  days: '',
-  startDate: '',
-  budget: { level: '', amount: '', currency: 'CNY', basis: 'total', hardLimit: false },
-  pace: '',
-  transport: { priority: '', allowedModes: ['WALK', 'TRANSIT'], avoidModes: [] },
-  travelers: { adults: 1, children: 0, seniors: 0 },
-  maxWalkingKm: 6,
-  dailyStartTime: '09:00',
-  dailyEndTime: '20:00',
-  interests: [],
-  accommodation: { style: 'hotel', locationPriority: '公共交通方便' },
-  dietaryNeeds: '',
-  accessibilityNeeds: '',
-  notes: '',
-};
+import { cloneProfile } from '../services/planModel.js';
 
 const EXAMPLES = [
   {
@@ -36,29 +20,25 @@ const EXAMPLES = [
   },
 ];
 
-function mergeProfile(profile) {
-  return {
-    ...DEFAULT_PROFILE,
-    ...(profile || {}),
-    budget: { ...DEFAULT_PROFILE.budget, ...(profile?.budget || {}) },
-    transport: { ...DEFAULT_PROFILE.transport, ...(profile?.transport || {}) },
-    travelers: { ...DEFAULT_PROFILE.travelers, ...(profile?.travelers || {}) },
-    accommodation: { ...DEFAULT_PROFILE.accommodation, ...(profile?.accommodation || {}) },
-    interests: Array.isArray(profile?.interests) ? profile.interests : [],
+export default function InputPanel({
+  draft,
+  onDraftChange,
+  onClear,
+  onSubmit,
+  loading,
+  draftStorageAvailable,
+}) {
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const query = draft?.query || '';
+  const profile = useMemo(() => cloneProfile(draft?.profile), [draft?.profile]);
+
+  const setProfile = (update) => {
+    onDraftChange(current => {
+      const currentProfile = cloneProfile(current.profile);
+      const nextProfile = typeof update === 'function' ? update(currentProfile) : update;
+      return { ...current, profile: cloneProfile(nextProfile) };
+    });
   };
-}
-
-export default function InputPanel({ onSubmit, loading, initialQuery = '', initialProfile }) {
-  const [query, setQuery] = useState(initialQuery);
-  const [profile, setProfile] = useState(() => mergeProfile(initialProfile));
-
-  useEffect(() => {
-    setQuery(initialQuery || '');
-  }, [initialQuery]);
-
-  useEffect(() => {
-    setProfile(mergeProfile(initialProfile));
-  }, [initialProfile]);
 
   const requiredChecks = useMemo(() => ([
     Boolean(query.trim()),
@@ -74,21 +54,53 @@ export default function InputPanel({ onSubmit, loading, initialQuery = '', initi
   const handleSubmit = (e) => {
     e.preventDefault();
     if (canSubmit) {
-      onSubmit({ query: query.trim(), profile: mergeProfile(profile) });
+      onSubmit({ query: query.trim(), profile: cloneProfile(profile) });
     }
   };
 
   const applyExample = (example) => {
-    setQuery(example.query);
-    setProfile(mergeProfile(example.profile));
+    setConfirmingClear(false);
+    onDraftChange({ query: example.query, profile: cloneProfile(example.profile) });
   };
 
   return (
     <div className="input-panel">
       <form onSubmit={handleSubmit}>
+        <div className="form-toolbar">
+          <div>
+            <strong>旅行需求</strong>
+            <span>
+              {draftStorageAvailable === false
+                ? '浏览器阻止了本地保存，刷新后内容可能丢失'
+                : '输入内容会自动保存在此设备'}
+            </span>
+          </div>
+          {confirmingClear ? (
+            <div className="clear-confirmation" role="group" aria-label="确认清空表单">
+              <span>确定清空？</span>
+              <button
+                type="button"
+                className="clear-confirm-button"
+                onClick={() => {
+                  onClear();
+                  setConfirmingClear(false);
+                }}
+                disabled={loading}
+              >确认</button>
+              <button type="button" onClick={() => setConfirmingClear(false)}>取消</button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="clear-form-button"
+              onClick={() => setConfirmingClear(true)}
+              disabled={loading}
+            >清空表单</button>
+          )}
+        </div>
         <textarea
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(event) => onDraftChange(current => ({ ...current, query: event.target.value }))}
           placeholder="描述你的旅行计划，比如：我想去京都玩三天，想去清水寺、伏见稻荷..."
           rows={3}
           disabled={loading}

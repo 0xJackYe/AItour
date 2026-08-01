@@ -106,7 +106,6 @@ export default function MapView({
   const overlaysRef = useRef({ markers: [], polylines: [], listeners: [], infoWindow: null });
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
-  const [renderingMode, setRenderingMode] = useState('');
 
   const activeDay = useMemo(() => {
     if (selectedDay === null) return null;
@@ -115,7 +114,6 @@ export default function MapView({
 
   useEffect(() => {
     let cancelled = false;
-    let renderingListener;
     loadGoogleMaps().then(api => {
       if (cancelled || !containerRef.current) return;
       apiRef.current = api;
@@ -137,18 +135,38 @@ export default function MapView({
         backgroundColor: '#e8edf4',
       };
       mapRef.current = new api.maps.Map(containerRef.current, options);
-      const syncMode = () => setRenderingMode(String(mapRef.current?.getRenderingType?.() || '').toLowerCase());
-      renderingListener = mapRef.current.addListener('renderingtype_changed', syncMode);
-      syncMode();
       setReady(true);
     }).catch(loadError => {
       if (!cancelled) setError(loadError.message || 'Google 地图加载失败');
     });
     return () => {
       cancelled = true;
-      renderingListener?.remove();
     };
   }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    const map = mapRef.current;
+    const maps = apiRef.current?.maps;
+    if (!ready || !container || !map || !maps || typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const center = map.getCenter?.();
+        maps.event.trigger(map, 'resize');
+        if (center) map.setCenter(center);
+      });
+    });
+    observer.observe(container);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(frame);
+    };
+  }, [ready]);
 
   useEffect(() => {
     if (!ready || !mapRef.current || !apiRef.current) return undefined;
@@ -351,11 +369,6 @@ export default function MapView({
           <span aria-hidden="true">⌁</span>
           <strong>你的旅程会在这里展开</strong>
           <p>完善左侧资料后，地图将按天展示地点与真实交通段。</p>
-        </div>
-      )}
-      {ready && (
-        <div className="google-provider-badge">
-          Google Maps{renderingMode ? ` · ${renderingMode === 'vector' ? '矢量' : '兼容'}模式` : ''}
         </div>
       )}
       {ready && plan && (

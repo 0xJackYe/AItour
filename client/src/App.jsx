@@ -3,16 +3,24 @@ import MapView from './components/MapView.jsx';
 import InputPanel from './components/InputPanel.jsx';
 import PlanPanel from './components/PlanPanel.jsx';
 import HistoryPanel from './components/HistoryPanel.jsx';
+import PanelResizer from './components/PanelResizer.jsx';
 import { generatePlan, recalculatePlan } from './services/api.js';
 import { deletePlan, getHistory, saveSnapshot } from './services/storage.js';
 import {
+  clearFormDraft,
+  emptyFormDraft,
+  loadFormDraft,
+  normalizeFormDraft,
+  saveFormDraft,
+} from './services/formDraft.js';
+import {
   cloneProfile,
-  EMPTY_PROFILE,
   findDay,
   normalizeSnapshot,
   snapshotFromHistory,
 } from './services/planModel.js';
 import { initialTripState, tripReducer } from './services/tripReducer.js';
+import { clampSplitPercent, DEFAULT_SPLIT_PERCENT } from './services/splitPane.js';
 
 const GENERATION_STAGES = [
   ['understanding', 1200],
@@ -46,9 +54,13 @@ function syncSpots(day) {
 export default function App() {
   const [state, dispatch] = useReducer(tripReducer, initialTripState);
   const [history, setHistory] = useState([]);
-  const [draft, setDraft] = useState({ query: '', profile: cloneProfile(EMPTY_PROFILE) });
+  const [draft, setDraft] = useState(loadFormDraft);
+  const [draftStorageAvailable, setDraftStorageAvailable] = useState(null);
+  const [splitPercent, setSplitPercent] = useState(DEFAULT_SPLIT_PERCENT);
+  const [containerWidth, setContainerWidth] = useState(0);
   const [clarificationAnswers, setClarificationAnswers] = useState({});
   const activeRequest = useRef({ id: 0, controller: null, timers: [] });
+  const appBodyRef = useRef(null);
 
   const clearRequestTimers = useCallback(() => {
     activeRequest.current.timers.forEach(clearTimeout);
@@ -75,6 +87,44 @@ export default function App() {
     loadHistory();
     return cancelActiveRequest;
   }, [cancelActiveRequest, loadHistory]);
+
+  useEffect(() => {
+    setDraftStorageAvailable(saveFormDraft(draft));
+  }, [draft]);
+
+  useEffect(() => {
+    const container = appBodyRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return undefined;
+    const clampToContainer = () => {
+      const width = container.getBoundingClientRect().width;
+      setContainerWidth(width);
+      if (width > 768) setSplitPercent(current => clampSplitPercent(current, width));
+    };
+    clampToContainer();
+    const observer = new ResizeObserver(clampToContainer);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  const handleDraftChange = useCallback((update) => {
+    setDraft(current => normalizeFormDraft(
+      typeof update === 'function' ? update(current) : update,
+    ));
+    dispatch({ type: 'FORM_DRAFT_CHANGED' });
+  }, []);
+
+  const handleClearForm = useCallback(() => {
+    const storageCleared = clearFormDraft();
+    setDraftStorageAvailable(storageCleared);
+    setDraft(emptyFormDraft());
+    setClarificationAnswers({});
+    dispatch({ type: 'FORM_CLEARED', storageCleared });
+  }, []);
+
+  const handleSplitChange = useCallback((value) => {
+    const width = containerWidth || appBodyRef.current?.getBoundingClientRect().width || 0;
+    setSplitPercent(clampSplitPercent(value, width));
+  }, [containerWidth]);
 
   const startRequest = useCallback((type = 'GENERATE_START') => {
     cancelActiveRequest();
@@ -271,13 +321,19 @@ export default function App() {
         </div>
       </header>
 
-      <main className="app-body">
-        <section className="left-panel" aria-label="旅行计划">
+      <main
+        ref={appBodyRef}
+        className="app-body"
+        style={{ '--left-pane-width': `${splitPercent}%` }}
+      >
+        <section id="trip-planning-panel" className="left-panel" aria-label="旅行计划">
           <InputPanel
+            draft={draft}
+            onDraftChange={handleDraftChange}
+            onClear={handleClearForm}
             onSubmit={handleSubmit}
             loading={Boolean(state.pending)}
-            initialQuery={draft.query}
-            initialProfile={draft.profile}
+            draftStorageAvailable={draftStorageAvailable}
           />
 
           {state.pending && (
@@ -366,7 +422,14 @@ export default function App() {
           />
         </section>
 
-        <section className="map-container" aria-label="行程地图">
+        <PanelResizer
+          containerRef={appBodyRef}
+          containerWidth={containerWidth}
+          value={splitPercent}
+          onChange={handleSplitChange}
+        />
+
+        <section id="trip-map-panel" className="map-container" aria-label="行程地图">
           <MapView
             plan={snapshot?.plan || null}
             routes={snapshot?.routes || []}

@@ -121,6 +121,17 @@ export function tripReducer(state, action) {
       return { ...state, notice: action.notice };
     case 'CLEAR_ERROR':
       return { ...state, error: null };
+    case 'FORM_DRAFT_CHANGED':
+      return { ...state, clarification: null, error: null, notice: null };
+    case 'FORM_CLEARED':
+      return {
+        ...state,
+        clarification: null,
+        error: null,
+        notice: action.storageCleared === false
+          ? '表单已从页面清空，但浏览器阻止了本地存储；刷新后旧内容可能重新出现。'
+          : '表单已清空；当前方案和历史版本仍然保留。',
+      };
     default:
       return state;
   }

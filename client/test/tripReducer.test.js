@@ -34,3 +34,28 @@ test('编辑提交后可以撤销和重做完整快照', () => {
   state = tripReducer(state, { type: 'REDO' });
   assert.equal(state.committed.id, 'edited');
 });
+
+test('清空表单只清理输入反馈并保留当前方案', () => {
+  const committed = snapshot('kept-plan');
+  const state = tripReducer({
+    ...initialTripState,
+    committed,
+    clarification: { questions: ['预算？'] },
+    error: '旧错误',
+  }, { type: 'FORM_CLEARED' });
+
+  assert.equal(state.committed, committed);
+  assert.equal(state.clarification, null);
+  assert.equal(state.error, null);
+  assert.match(state.notice, /当前方案和历史版本仍然保留/);
+});
+
+test('清空时本地存储失败会明确提醒刷新风险', () => {
+  const state = tripReducer(initialTripState, {
+    type: 'FORM_CLEARED',
+    storageCleared: false,
+  });
+
+  assert.match(state.notice, /浏览器阻止了本地存储/);
+  assert.match(state.notice, /旧内容可能重新出现/);
+});
