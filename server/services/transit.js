@@ -19,25 +19,35 @@ function firstSpotCoordinates(plan) {
 }
 
 export async function findNearbyTransit(plan, accommodationCoordinates) {
-  const center = accommodationCoordinates || firstSpotCoordinates(plan);
-  if (!center) return [];
+  const accommodationCenters = (plan.accommodations || [])
+    .filter(item => item?.coordinates)
+    .map(item => ({ coordinates: item.coordinates, city: item.city || null, country: item.country || null }));
+  const centers = accommodationCenters.length
+    ? accommodationCenters
+    : [{ coordinates: accommodationCoordinates || firstSpotCoordinates(plan), city: plan.city || null, country: plan.country || null }]
+        .filter(item => item.coordinates);
+  if (!centers.length) return [];
 
-  try {
-    const places = await searchNearbyTransit(center, 2500);
-    const candidates = places
-      .map(place => ({
+  const groups = await Promise.all(centers.map(async center => {
+    try {
+      const places = await searchNearbyTransit(center.coordinates, 2500);
+      return places.map(place => ({
         name: place.displayName?.text || place.formattedAddress || '公共交通站',
         type: 'transport',
+        city: center.city,
+        country: center.country,
         place_id: place.id || null,
         google_maps_uri: place.googleMapsUri || null,
         coordinates: placeToCoordinates(place),
-      }))
-      .filter(item => item.coordinates);
-    return candidates.filter((item, index, all) =>
-      all.findIndex(other => distanceMeters(item.coordinates, other.coordinates) < 120) === index,
-    );
-  } catch (error) {
-    console.warn(`[Transit] Google Nearby Search 失败: ${error.message}`);
-    return [];
-  }
+      })).filter(item => item.coordinates);
+    } catch (error) {
+      console.warn(`[Transit] ${center.city || '目的地'}附近交通点查询失败: ${error.message}`);
+      return [];
+    }
+  }));
+  const candidates = groups.flat();
+  return candidates.filter((item, index, all) =>
+    all.findIndex(other => (item.place_id && other.place_id === item.place_id)
+      || distanceMeters(item.coordinates, other.coordinates) < 120) === index,
+  );
 }

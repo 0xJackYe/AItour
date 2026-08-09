@@ -2,8 +2,22 @@ import { geocodeAddress, searchPlacesText, placeToCoordinates } from './google.j
 
 const FALLBACK_MAX_DISTANCE_KM = 35;
 const VIEWPORT_PADDING_RATIO = 0.03;
+const ADMINISTRATIVE_GEOCODER_TYPES = new Set(['locality', 'postal_town']);
 
 console.log('[Geocode] 模块加载: Google Places + Geocoding 严格城市消歧');
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function run() {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await worker(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
+  return results;
+}
 
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R = 6371;
@@ -26,6 +40,28 @@ function normalizeViewport(geometry) {
     high: {
       latitude: viewport.northeast.lat,
       longitude: viewport.northeast.lng,
+    },
+  };
+}
+
+function isAdministrativeGeocoderResult(result) {
+  return (result?.types || []).some(type =>
+    ADMINISTRATIVE_GEOCODER_TYPES.has(type) || String(type).startsWith('administrative_area_level_'),
+  );
+}
+
+function radiusSearchViewport(lat, lng, radiusKm = FALLBACK_MAX_DISTANCE_KM) {
+  const latitudeDelta = radiusKm / 111.32;
+  const longitudeScale = Math.max(0.05, Math.cos((lat * Math.PI) / 180));
+  const longitudeDelta = radiusKm / (111.32 * longitudeScale);
+  return {
+    low: {
+      latitude: Math.max(-90, lat - latitudeDelta),
+      longitude: Math.max(-180, lng - longitudeDelta),
+    },
+    high: {
+      latitude: Math.min(90, lat + latitudeDelta),
+      longitude: Math.min(180, lng + longitudeDelta),
     },
   };
 }
@@ -83,6 +119,38 @@ function placeCountryCode(place) {
   return place?.addressComponents
     ?.find(component => component.types?.includes('country'))
     ?.shortText?.toUpperCase() || null;
+}
+
+function placeCountryNames(place) {
+  const component = place?.addressComponents?.find(item => item.types?.includes('country'));
+  return [component?.longText, component?.shortText]
+    .map(normalizeAdministrativeName)
+    .filter(Boolean);
+}
+
+export function cityContextFromGeocoderResult(city, country, result) {
+  if (!result?.geometry?.location) return null;
+  const lat = Number(result.geometry.location.lat);
+  const lng = Number(result.geometry.location.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const administrative = isAdministrativeGeocoderResult(result);
+  return {
+    lat,
+    lng,
+    display_name: result.formatted_address,
+    viewport: administrative ? normalizeViewport(result.geometry) : null,
+    searchViewport: administrative
+      ? normalizeViewport(result.geometry)
+      : radiusSearchViewport(lat, lng, FALLBACK_MAX_DISTANCE_KM),
+    boundaryMode: administrative ? 'administrative' : 'region_radius',
+    regionRadiusKm: administrative ? null : FALLBACK_MAX_DISTANCE_KM,
+    geocoderTypes: Array.isArray(result.types) ? [...result.types] : [],
+    place_id: result.place_id || null,
+    cityName: city,
+    countryName: country,
+    countryCode: geocoderCountryCode(result),
+    targetAdministrativeNames: administrative ? targetAdministrativeNames(city, result) : [],
+  };
 }
 
 function viewportDiagonalKm(viewport) {
@@ -144,6 +212,58 @@ export function placeNameMatches(place, expectedName, city = '', country = '') {
   return expectedTokens.length <= 3 && matches.some(token => token.length >= 5);
 }
 
+function strictRegionAnchorNameMatches(place, expectedName, country = '') {
+  const candidateName = place?.displayName?.text || '';
+  if (!candidateName || !expectedName) return false;
+  const expectedCompact = compactPlaceName(expectedName);
+  const candidateCompact = compactPlaceName(candidateName);
+  if (Math.min(expectedCompact.length, candidateCompact.length) >= 3
+    && (expectedCompact.includes(candidateCompact) || candidateCompact.includes(expectedCompact))) {
+    return true;
+  }
+  const countryWords = new Set(nameTokens(country));
+  const expectedTokens = nameTokens(expectedName)
+    .filter(token => token.length >= 2 && !GENERIC_PLACE_WORDS.has(token) && !countryWords.has(token));
+  const candidateTokens = nameTokens(candidateName)
+    .filter(token => token.length >= 2 && !GENERIC_PLACE_WORDS.has(token));
+  if (!expectedTokens.length || !candidateTokens.length) return false;
+  const matches = expectedTokens.filter(expected =>
+    candidateTokens.some(candidate => tokenMatches(expected, candidate)),
+  );
+  return matches.length / expectedTokens.length >= 0.5;
+}
+
+function regionAnchorCountryMatches(place, country, preliminaryContext) {
+  const candidateCode = placeCountryCode(place);
+  const candidateNames = placeCountryNames(place);
+  const requestedCountry = normalizeAdministrativeName(country);
+  if (requestedCountry && candidateNames.includes(requestedCountry)) return true;
+  return Boolean(preliminaryContext?.countryCode && candidateCode === preliminaryContext.countryCode);
+}
+
+function regionContextFromPlace(city, country, place, preliminaryContext) {
+  const lat = Number(place?.location?.latitude);
+  const lng = Number(place?.location?.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return {
+    lat,
+    lng,
+    display_name: place.formattedAddress || place.displayName?.text || city,
+    viewport: null,
+    searchViewport: radiusSearchViewport(lat, lng, FALLBACK_MAX_DISTANCE_KM),
+    anchorViewport: place.viewport || null,
+    boundaryMode: 'region_radius',
+    regionRadiusKm: FALLBACK_MAX_DISTANCE_KM,
+    geocoderTypes: Array.isArray(place.types) ? [...place.types] : [],
+    place_id: place.id || null,
+    cityName: city,
+    countryName: country,
+    countryCode: placeCountryCode(place) || preliminaryContext?.countryCode || null,
+    targetAdministrativeNames: [],
+    anchorSource: 'places_text',
+  };
+}
+
 export async function geocodeCity(city, country = '') {
   if (!city) return null;
   try {
@@ -152,17 +272,30 @@ export async function geocodeCity(city, country = '') {
     const results = await geocodeAddress([city, country].filter(Boolean).join(', '), 'en');
     const result = results[0];
     if (!result?.geometry?.location) return null;
-    return {
-      lat: result.geometry.location.lat,
-      lng: result.geometry.location.lng,
-      display_name: result.formatted_address,
-      viewport: normalizeViewport(result.geometry),
-      place_id: result.place_id || null,
-      cityName: city,
-      countryName: country,
-      countryCode: geocoderCountryCode(result),
-      targetAdministrativeNames: targetAdministrativeNames(city, result),
-    };
+    const preliminaryContext = cityContextFromGeocoderResult(city, country, result);
+    if (!preliminaryContext || preliminaryContext.boundaryMode === 'administrative') {
+      return preliminaryContext;
+    }
+
+    // A non-administrative geocoder hit may be a same-name sublocality far from
+    // the requested natural region. Re-anchor only from a strict Places match;
+    // never use the potentially wrong geocoder point as a fallback.
+    const query = [city, country].filter(Boolean).join(', ');
+    const languageCode = /[\u3400-\u9fff]/u.test(city) ? 'zh-CN' : 'en';
+    const candidates = await searchPlacesText(query, {
+      pageSize: 5,
+      regionCode: preliminaryContext.countryCode,
+      languageCode,
+    });
+    const safeAnchors = candidates.filter(place =>
+      place?.location
+      && strictRegionAnchorNameMatches(place, city, country)
+      && regionAnchorCountryMatches(place, country, preliminaryContext),
+    );
+    const expectedCompact = compactPlaceName(city);
+    const anchor = safeAnchors.find(place => compactPlaceName(place.displayName?.text) === expectedCompact)
+      || safeAnchors[0];
+    return anchor ? regionContextFromPlace(city, country, anchor, preliminaryContext) : null;
   } catch (error) {
     console.warn(`[Geocode] 城市定位失败 (${city}, ${country}): ${error.message}`);
     return null;
@@ -170,8 +303,30 @@ export async function geocodeCity(city, country = '') {
 }
 
 export function isInTargetCity(place, cityContext) {
-  if (!cityContext || !place?.location) return true;
+  // 有城市硬约束时，无法建立城市锚点必须 fail-closed。
+  // 否则 Places 的全球同名候选会被错当成目标城市地点。
+  if (!cityContext || !place?.location) return false;
   const candidateCountry = placeCountryCode(place);
+  if (cityContext.boundaryMode === 'region_radius') {
+    if (cityContext.countryCode) {
+      if (!candidateCountry || candidateCountry !== cityContext.countryCode) return false;
+    } else {
+      const contextCountryNames = [cityContext.countryName]
+        .map(normalizeAdministrativeName)
+        .filter(Boolean);
+      const candidateCountryNames = placeCountryNames(place);
+      if (!candidateCountryNames.length
+        || !contextCountryNames.some(expected => candidateCountryNames.includes(expected))) {
+        return false;
+      }
+    }
+    return haversineKm(
+      place.location.latitude,
+      place.location.longitude,
+      cityContext.lat,
+      cityContext.lng,
+    ) <= (Number(cityContext.regionRadiusKm) || FALLBACK_MAX_DISTANCE_KM);
+  }
   if (cityContext.countryCode && candidateCountry && candidateCountry !== cityContext.countryCode) {
     return false;
   }
@@ -214,12 +369,13 @@ export function isInTargetCity(place, cityContext) {
 }
 
 async function searchRestricted(fullQuery, cityContext, languageCode) {
-  if (!cityContext?.viewport) {
+  const searchViewport = cityContext?.searchViewport || cityContext?.viewport;
+  if (!searchViewport) {
     return searchPlacesText(fullQuery, { pageSize: 5, languageCode });
   }
   try {
     return await searchPlacesText(fullQuery, {
-      locationRestriction: cityContext.viewport,
+      locationRestriction: searchViewport,
       pageSize: 5,
       regionCode: cityContext.countryCode,
       languageCode,
@@ -227,7 +383,7 @@ async function searchRestricted(fullQuery, cityContext, languageCode) {
   } catch (error) {
     console.warn(`[Geocode] Places 区域限制搜索失败，改用偏好搜索: ${error.message}`);
     return searchPlacesText(fullQuery, {
-      locationBias: cityContext.viewport,
+      locationBias: searchViewport,
       pageSize: 5,
       regionCode: cityContext.countryCode,
       languageCode,
@@ -239,8 +395,9 @@ async function findPlace(query, city, country, cityContext) {
   const fullQuery = [query, city, country].filter(Boolean).join(', ');
   const languageCode = /[\u3400-\u9fff]/u.test(query) ? 'zh-CN' : 'en';
   const restrictedPlaces = await searchRestricted(fullQuery, cityContext, languageCode);
+  const belongsToTarget = place => city ? isInTargetCity(place, cityContext) : Boolean(place?.location);
   const restrictedMatch = restrictedPlaces.find(place =>
-    isInTargetCity(place, cityContext) && placeNameMatches(place, query, city, country),
+    belongsToTarget(place) && placeNameMatches(place, query, city, country),
   );
   if (restrictedMatch) {
     return { coordinates: placeToCoordinates(restrictedMatch), place: restrictedMatch, status: 'verified' };
@@ -249,15 +406,16 @@ async function findPlace(query, city, country, cityContext) {
   // 区域限制无结果时再做一次软搜索，仅用于判断 Google 是否命中了外地同名地点。
   // 软搜索的结果仍必须经过硬边界校验，绝不会直接作为坐标返回。
   let diagnosticPlaces = restrictedPlaces;
-  if (cityContext?.viewport && restrictedPlaces.length === 0) {
+  const searchViewport = cityContext?.searchViewport || cityContext?.viewport;
+  if (searchViewport && restrictedPlaces.length === 0) {
     diagnosticPlaces = await searchPlacesText(fullQuery, {
-      locationBias: cityContext.viewport,
+      locationBias: searchViewport,
       pageSize: 5,
       regionCode: cityContext.countryCode,
       languageCode,
     });
     const diagnosticMatch = diagnosticPlaces.find(place =>
-      isInTargetCity(place, cityContext) && placeNameMatches(place, query, city, country),
+      belongsToTarget(place) && placeNameMatches(place, query, city, country),
     );
     if (diagnosticMatch) {
       return { coordinates: placeToCoordinates(diagnosticMatch), place: diagnosticMatch, status: 'verified' };
@@ -272,7 +430,7 @@ async function findPlace(query, city, country, cityContext) {
     };
   }
 
-  const sameCityWrongName = diagnosticPlaces.find(place => isInTargetCity(place, cityContext));
+  const sameCityWrongName = diagnosticPlaces.find(place => belongsToTarget(place));
   if (sameCityWrongName) {
     return {
       coordinates: null,
@@ -390,7 +548,7 @@ export async function geocodeAllSpots(plan) {
         spotIndex,
         city,
         country,
-        promise: locateSpot(spot, city, country, cityContext),
+        cityContext,
       };
     });
   });
@@ -405,15 +563,20 @@ export async function geocodeAllSpots(plan) {
       accommodation,
       city,
       country,
-      promise: accommodation.landmark
-        ? findPlace(accommodation.landmark, city, country, context)
-        : Promise.resolve({ coordinates: null, status: 'not_found', reason: '没有住宿地标' }),
+      context,
     };
   });
 
   const [spotResults, accommodationResults] = await Promise.all([
-    Promise.all(spotJobs.map(job => job.promise)),
-    Promise.all(accommodationJobs.map(job => job.promise)),
+    mapWithConcurrency(spotJobs, 8, job => locateSpot(
+      job.spot,
+      job.city,
+      job.country,
+      job.cityContext,
+    )),
+    mapWithConcurrency(accommodationJobs, 4, job => job.accommodation.landmark
+      ? findPlace(job.accommodation.landmark, job.city, job.country, job.context)
+      : Promise.resolve({ coordinates: null, status: 'not_found', reason: '没有住宿地标' })),
   ]);
   const spotResultByKey = new Map();
   let geocodedCount = 0;
@@ -443,7 +606,8 @@ export async function geocodeAllSpots(plan) {
     const result = accommodationResults[index];
     if (result?.coordinates) {
       geocodedCount++;
-      return { ...accommodation, coordinates: result.coordinates };
+      const placeId = result.place?.id || result.coordinates?.place_id || null;
+      return { ...accommodation, place_id: placeId, placeId, coordinates: result.coordinates };
     }
     if (accommodation.landmark) {
       warnings.push({
@@ -460,14 +624,21 @@ export async function geocodeAllSpots(plan) {
 
   const enrichedDailyPlans = (plan.daily_plans || []).map((day, dayIndex) => ({
     ...day,
-    spots: (day.spots || []).flatMap((spot, spotIndex) => {
+    spots: (day.spots || []).map((spot, spotIndex) => {
       const result = spotResultByKey.get(spotLocationKey(dayIndex, spotIndex));
-      if (result?.status === 'outside_target' || result?.status === 'name_mismatch') return [];
-      return [{
+      const rejected = result?.status === 'outside_target' || result?.status === 'name_mismatch';
+      const placeId = rejected
+        ? null
+        : result?.place?.id || result?.coordinates?.place_id || spot.place_id || spot.placeId || null;
+      return {
         ...spot,
+        place_id: placeId,
+        placeId,
         location_id: spotLocationKey(dayIndex, spotIndex),
-        coordinates: result?.coordinates || null,
-      }];
+        coordinates: rejected ? null : result?.coordinates || null,
+        location_status: rejected ? 'rejected' : result?.coordinates ? 'verified' : 'unverified',
+        location_issue: rejected ? result?.reason || '地点未通过城市与名称校验' : null,
+      };
     }),
   }));
 

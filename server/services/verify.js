@@ -13,6 +13,7 @@ const VERIFY_SYSTEM_PROMPT = `你是旅行规划质量审核员。给定用户�
 1. coverage（覆盖度）：用户在原始需求中明确点名的景点 / 区域 / 体验，是否都出现在 daily_plans 的 spots 里？
 2. accuracy（准确性）：每个 spot 是否真实存在？name 与 name_en 是否对应同一个真实地点？是否的确位于该 spot 所属 day.city / day.country 行政范围内（特别警惕同名地点位于其他城市的情况，比如东京和静冈都有重名地名）？
 3. consistency（一致性）：天数与景点数量是否匹配用户偏好的节奏（relaxed/moderate/intensive）？
+4. intercity_transport（跨城交通）：相邻两天 city/country 变化时，前一天 connection_to_next_notes 是否准确对应 from/to 城市，并包含具体车站/机场、线路或车辆和换乘点；不得用当天市内 transport_notes 冒充跨城说明。
 
 严格按以下 JSON 输出，不要任何额外文字：
 {
@@ -21,14 +22,32 @@ const VERIFY_SYSTEM_PROMPT = `你是旅行规划质量审核员。给定用户�
   "incorrect_spots": [
     { "name": "景点名", "issue": "具体问题，如：name_en 不是该景点的官方英文名 / 该景点位于 XX 而非 plan.city / 不存在该景点 等" }
   ],
+  "transport_issues": [
+    { "day": 2, "issue": "Day 2 到 Day 3 的具体跨城交通问题" }
+  ],
   "warnings": ["其他不严重但值得提醒用户的问题（如：节奏偏紧、某天景点过多）"],
   "needs_regeneration": true | false
 }
 
 判定规则：
 - 仅当用户原文里明确写出的景点漏掉了，或景点出现明显错误（不存在 / 在错误城市 / name_en 错误），才算失败 (passed=false)。
+- 多城市相邻日发生换城时，connection_to_next_notes 缺失、只写“公共交通/火车”、from/to 城市错误或误用了当天市内交通说明，也算失败并加入 transport_issues；非换城日该字段应为 null。
 - 仅当 missing_spots 或 incorrect_spots 中存在影响计划主体的严重问题时，needs_regeneration=true；否则即便 passed=false，也可设 false（避免无谓重试）。
+- transport_issues 中存在跨城说明缺失或方向错误时，needs_regeneration=true。
 - 不要编造问题。如果计划没有问题，直接 {"passed": true, "missing_spots": [], "incorrect_spots": [], "warnings": [], "needs_regeneration": false}。`;
+
+function unknownVerification(reason) {
+  return {
+    status: 'unknown',
+    passed: false,
+    missing_spots: [],
+    incorrect_spots: [],
+    transport_issues: [],
+    warnings: [`AI 内容审核未完成：${reason}；这不代表计划已通过确定性校验。`],
+    needs_regeneration: false,
+    skipped: true,
+  };
+}
 
 function buildPlanSummary(plan) {
   return {
@@ -36,6 +55,7 @@ function buildPlanSummary(plan) {
     country: plan.country,
     days: plan.days,
     preferences: plan.preferences,
+    route_reasoning: plan.route_reasoning || null,
     accommodation: plan.accommodation
       ? { area: plan.accommodation.area, landmark: plan.accommodation.landmark }
       : null,
@@ -44,6 +64,8 @@ function buildPlanSummary(plan) {
       city: d.city,
       country: d.country,
       theme: d.theme,
+      transport_notes: d.transport_notes || null,
+      connection_to_next_notes: d.connection_to_next_notes ?? null,
       spots: (d.spots || []).map(s => ({
         name: s.name,
         name_en: s.name_en,
@@ -58,13 +80,15 @@ function buildPlanSummary(plan) {
 export async function verifyPlan(userQuery, plan) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false };
+    return unknownVerification('未配置 DeepSeek API');
   }
 
   const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
   const userMsg = `【用户原始需求】\n${userQuery}\n\n【已生成的旅行计划】\n${JSON.stringify(buildPlanSummary(plan), null, 2)}`;
 
   let response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
   try {
     response = await fetch(`${baseUrl}/v1/chat/completions`, {
       method: 'POST',
@@ -72,6 +96,7 @@ export async function verifyPlan(userQuery, plan) {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
+      signal: controller.signal,
       body: JSON.stringify({
         model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
         messages: [
@@ -85,17 +110,19 @@ export async function verifyPlan(userQuery, plan) {
     });
   } catch (err) {
     console.warn('[Verify] 调用失败，跳过校验:', err.message);
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification(err.name === 'AbortError' ? '请求超时' : '服务不可用');
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (!response.ok) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification(`服务返回 HTTP ${response.status}`);
   }
 
   const data = await response.json();
   const content = data.choices?.[0]?.message?.content;
   if (!content) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification('审核模型未返回内容');
   }
 
   let parsed;
@@ -108,13 +135,15 @@ export async function verifyPlan(userQuery, plan) {
     }
   }
   if (!parsed) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return unknownVerification('审核输出不是合法 JSON');
   }
 
   return {
+    status: parsed.passed === false ? 'failed' : 'passed',
     passed: parsed.passed !== false,
     missing_spots: Array.isArray(parsed.missing_spots) ? parsed.missing_spots : [],
     incorrect_spots: Array.isArray(parsed.incorrect_spots) ? parsed.incorrect_spots : [],
+    transport_issues: Array.isArray(parsed.transport_issues) ? parsed.transport_issues : [],
     warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
     needs_regeneration: parsed.needs_regeneration === true,
   };
@@ -131,9 +160,13 @@ export function buildRegenFeedback(verification) {
   for (const item of verification.incorrect_spots || []) {
     lines.push(`- "${item.name}" 存在问题：${item.issue}`);
   }
+  for (const item of verification.transport_issues || []) {
+    lines.push(`- Day ${item.day || '?'} 跨城交通说明存在问题：${item.issue}`);
+  }
   for (const w of verification.warnings || []) {
     lines.push(`- 注意：${w}`);
   }
   lines.push('请确保所有景点都真实存在、确实位于各自 day.city/day.country 行政范围内（不要被同名地点误导，如东京 vs 静冈）。');
+  lines.push('请确保每个换城日的 connection_to_next_notes 与实际 from/to 城市一致，并写明具体车站、线路/车辆和换乘点。');
   return lines.join('\n');
 }

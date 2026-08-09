@@ -1,0 +1,42 @@
+name: quality-gate
+
+on:
+  push:
+    branches: [main, 'agent/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.1
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+            client/package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Install server dependencies
+        run: npm ci --prefix server
+      - name: Install client dependencies
+        run: npm ci --prefix client
+      - name: Run tests and production build
+        run: npm run check
+      - name: Audit root dependencies
+        run: npm audit --audit-level=moderate --registry=https://registry.npmjs.org
+      - name: Audit server dependencies
+        run: npm audit --prefix server --audit-level=moderate --registry=https://registry.npmjs.org
+      - name: Audit client dependencies
+        run: npm audit --prefix client --audit-level=moderate --registry=https://registry.npmjs.org

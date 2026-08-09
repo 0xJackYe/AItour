@@ -1,3 +1,5 @@
+import { profilePrompt } from './preferences.js';
+
 const LONG_TRIP_THRESHOLD_DAYS = 12;
 const DETAIL_CHUNK_SIZE = 7;
 const DEFAULT_MAX_TOKENS = 8192;
@@ -14,13 +16,16 @@ const PLAN_SCHEMA = `{
     "preferences": {
       "pace": "relaxed | moderate | intensive",
       "budget": "budget | moderate | luxury",
-      "interests": ["文化", "自然"]
+      "interests": ["文化", "自然"],
+      "transport_priority": "balanced | cost | time | comfort | walking(表示少步行) | transit | rail",
+      "allowed_transport_modes": ["WALK", "TRANSIT", "DRIVE", "BICYCLE", "RAIL", "FLIGHT"],
+      "max_walking_km": 5
     },
     "destinations": [
       { "city": "城市", "country": "国家", "start_day": 1, "end_day": 3 }
     ],
     "accommodations": [
-      { "city": "城市", "country": "国家", "area": "住宿区域", "reason": "原因", "landmark": "可地理编码地标" }
+      { "city": "城市", "country": "国家", "area": "住宿区域", "reason": "原因", "landmark": "可地理编码地标", "check_in_day": 1, "check_out_day": 4 }
     ],
     "accommodation": { "area": "单城市兼容字段", "reason": "原因", "landmark": "地标" },
     "daily_plans": [
@@ -37,11 +42,20 @@ const PLAN_SCHEMA = `{
             "country": "景点实际所在国家",
             "type": "attraction | restaurant | transport | hotel | shopping",
             "duration_hours": 2,
+            "preferred_start_time": "09:30",
+            "cost": {
+              "amount": 120,
+              "currency": "必须与用户预算币种一致",
+              "basis": "group_total",
+              "category": "activities | food | transport | lodging | shopping",
+              "confidence": "estimate"
+            },
             "description": "简短描述",
             "tips": "实用建议"
           }
         ],
-        "transport_notes": "当天交通建议"
+        "transport_notes": "当天市内交通建议，说明逐段建议交通方式",
+        "connection_to_next_notes": "仅当本日结束后换到下一城市时填写；明确起止城市、车站/机场、线路或车辆、换乘点和行李衔接；非换城日必须为 null"
       }
     ],
     "route_reasoning": "路线逻辑",
@@ -63,14 +77,17 @@ ${PLAN_SCHEMA}
 6. 用户明确点名的地点、国家和体验必须覆盖；跨国路线严格遵守起点、终点和交通方式。
 7. 同名地点必须选当天 city/country 内的候选，并在 name_en 中附带城市或行政区用于消歧。
 8. 信息严重不足才返回 need_clarification。
-9. 描述和 tips 要简短，优先保证完整 JSON 和完整天数。`;
+9. 结构化用户偏好是硬约束：严格遵守预算、同行人、允许/避免交通方式、步行上限、每日作息、饮食和无障碍需求。
+10. 每天必须围绕当日住宿形成可返回的连续路线。transport_notes 只描述当天市内移动；若本日结束后换到下一城市，必须另在 connection_to_next_notes 中逐段写清 from/to 城市、退房、出发与到达车站/机场、具体线路或车辆（如新干线列车名、地铁线、巴士）、换乘点、行李和入住衔接，禁止只写“公共交通”“火车”等泛化方式，无法确认班次时注明临近出发复核；非换城日 connection_to_next_notes 必须为 null。
+11. 预算金额不能伪造精确价格。只有在有合理估算时才填写 cost；currency 必须与结构化预算币种一致，basis 固定为 group_total，金额必须是本次活动全部同行人的合计；不确定时 cost 填 null。住宿总价也可作为 hotel 节点 cost 输出，但不能重复计算。
+12. 描述和 tips 要简短，优先保证完整 JSON 和完整天数。`;
 
 const LONG_OUTLINE_PROMPT = `你是长途旅行路线架构师。请先输出一份紧凑但完整的长行程骨架，只输出 JSON。
 
 JSON 顶层和 plan 元数据必须遵循下面结构：
 ${PLAN_SCHEMA}
 
-这是长行程骨架阶段，daily_plans 中每个 spot 只输出 name、name_en、type；不要输出 description、tips、duration_hours，以节省长度。transport_notes 只写一句。
+这是长行程骨架阶段，daily_plans 中每个 spot 只输出 name、name_en、type；不要输出 description、tips、duration_hours、cost，以节省长度。transport_notes 只写一句；connection_to_next_notes 仅换城日填写具体跨城衔接，非换城日为 null。
 
 硬性要求：
 - daily_plans 必须逐日连续覆盖用户要求的全部天数。
@@ -78,6 +95,8 @@ ${PLAN_SCHEMA}
 - destinations 的天数范围必须覆盖全程；多国顺序、起点、终点和指定交通方式不得改变。
 - name_en 必须带城市或行政区消歧；不要选择同名的其他城市地点。
 - relaxed 节奏每天安排 2-3 个主要地点。
+- 必须遵守结构化偏好中的预算、同行人、交通、步行上限、日作息、无障碍和饮食约束。
+- 每座城市必须有可编码住宿地标；换城日必须用 connection_to_next_notes 逐段写出 from/to 城市、具体出发/到达车站或机场、线路/车辆和换乘点，禁止只写“公共交通”“火车”，不确定的班次注明临近出发复核，并规划退房、行李和入住；不得拿市内 transport_notes 代替。
 - 只输出 JSON，不要 Markdown。`;
 
 const DETAIL_PROMPT = `你是旅行计划细化助手。输入会包含用户原需求和一个已经确定的行程片段骨架。
@@ -86,7 +105,8 @@ const DETAIL_PROMPT = `你是旅行计划细化助手。输入会包含用户原
 要求：
 - 不得改变 day、city、country、景点 name、name_en、type，也不得增删景点。
 - 为每个景点补充 duration_hours、简短 description、简短 tips。
-- 补充当天 transport_notes，并遵守用户指定的交通方式和旅行节奏。
+- 有合理费用估算时补充 cost：{amount, currency, basis:"group_total", category, confidence:"estimate"}。currency 必须与用户预算币种一致，amount 是该活动全部同行人的合计；不确定时 cost 为 null。
+- 补充当天市内 transport_notes，并遵守用户指定的交通方式和旅行节奏；仅换城日补充 connection_to_next_notes，逐段写出 from/to 城市、具体出发/到达车站或机场、线路/车辆及换乘点，禁止只写“公共交通”“火车”，不确定班次注明临近出发复核；非换城日该字段为 null。
 - 只输出 JSON，不要 Markdown。`;
 
 export class LLMOutputError extends Error {
@@ -214,13 +234,69 @@ function destinationForDay(destinations, dayNumber) {
   );
 }
 
+function sameDayLocation(left, right) {
+  if (!left || !right) return true;
+  return String(left.city || '').trim().toLowerCase() === String(right.city || '').trim().toLowerCase()
+    && String(left.country || '').trim().toLowerCase() === String(right.country || '').trim().toLowerCase();
+}
+
+function hasMultipleCitiesWithinDay(day) {
+  const cities = new Set([day?.city, ...(day?.spots || []).map(spot => spot?.city)]
+    .map(value => String(value || '').trim().toLowerCase())
+    .filter(Boolean));
+  return cities.size > 1;
+}
+
+function dayCityAliases(day) {
+  return [...new Set([day?.city, ...(day?.spots || []).map(spot => spot?.city)]
+    .map(value => String(value || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ''))
+    .filter(Boolean))];
+}
+
+function noteReferencesDay(note, day) {
+  const text = String(note || '').normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+  return dayCityAliases(day).some(alias => text.includes(alias));
+}
+
+function noteNamesBothEndpoints(note, fromDay, toDay) {
+  return noteReferencesDay(note, fromDay) && noteReferencesDay(note, toDay);
+}
+
+function relocateArrivalDayConnectionNotes(dailyPlans) {
+  for (let index = 0; index < dailyPlans.length - 1; index++) {
+    const fromDay = dailyPlans[index];
+    const arrivalDay = dailyPlans[index + 1];
+    if (sameDayLocation(fromDay, arrivalDay)) continue;
+    if (String(fromDay.connection_to_next_notes || '').trim()) continue;
+    const misplaced = String(arrivalDay.connection_to_next_notes || '').trim();
+    if (!misplaced) continue;
+    // If the departure day already visits the next day's declared city, the note
+    // can represent a genuine same-day multi-city movement and must not be moved.
+    const arrivalCity = String(arrivalDay.city || '').trim().toLowerCase();
+    const departureAlreadyVisitsArrival = (fromDay.spots || []).some(spot =>
+      String(spot?.city || '').trim().toLowerCase() === arrivalCity,
+    );
+    if (departureAlreadyVisitsArrival) continue;
+    // Region aliases such as 富士山/河口湖 can make an arrival day look
+    // multi-city. Permit relocation only when the note explicitly references
+    // the departure side; ordinary local notes still stay untouched.
+    if (hasMultipleCitiesWithinDay(arrivalDay) && !noteReferencesDay(misplaced, fromDay)) continue;
+    const followingDay = dailyPlans[index + 2] || null;
+    const arrivalDoesNotDepartAgain = !followingDay || sameDayLocation(arrivalDay, followingDay);
+    if (!arrivalDoesNotDepartAgain && !noteNamesBothEndpoints(misplaced, fromDay, arrivalDay)) continue;
+    dailyPlans[index] = { ...fromDay, connection_to_next_notes: misplaced };
+    dailyPlans[index + 1] = { ...arrivalDay, connection_to_next_notes: null };
+  }
+  return dailyPlans;
+}
+
 export function normalizePlan(plan, requestedDays = null) {
   if (!plan || typeof plan !== 'object') return plan;
   const destinations = Array.isArray(plan.destinations) ? plan.destinations : [];
   const fallbackCity = plan.city && plan.city !== '多城市' ? plan.city : '';
   const fallbackCountry = plan.country && !String(plan.country).includes('、') ? plan.country : '';
   const singleDestinationScope = Boolean(fallbackCity && destinations.length <= 1);
-  const dailyPlans = (Array.isArray(plan.daily_plans) ? plan.daily_plans : [])
+  const dailyPlans = relocateArrivalDayConnectionNotes((Array.isArray(plan.daily_plans) ? plan.daily_plans : [])
     .map((day, index) => {
       const dayNumber = Number(day.day) || index + 1;
       const destination = destinationForDay(destinations, dayNumber);
@@ -242,7 +318,7 @@ export function normalizePlan(plan, requestedDays = null) {
         })),
       };
     })
-    .sort((a, b) => a.day - b.day);
+    .sort((a, b) => a.day - b.day));
 
   const accommodations = Array.isArray(plan.accommodations) && plan.accommodations.length
     ? plan.accommodations
@@ -289,6 +365,7 @@ function mergeDetailedDay(outlineDay, detailedDay) {
     return {
       ...spot,
       duration_hours: Number(detail.duration_hours) || Number(spot.duration_hours) || 2,
+      cost: detail.cost && typeof detail.cost === 'object' ? detail.cost : (spot.cost || null),
       description: detail.description || spot.description || '',
       tips: detail.tips || spot.tips || '',
     };
@@ -297,6 +374,9 @@ function mergeDetailedDay(outlineDay, detailedDay) {
     ...outlineDay,
     theme: detailedDay.theme || outlineDay.theme,
     transport_notes: detailedDay.transport_notes || outlineDay.transport_notes || '',
+    connection_to_next_notes: detailedDay.connection_to_next_notes
+      ?? outlineDay.connection_to_next_notes
+      ?? null,
     spots,
   };
 }
@@ -314,8 +394,9 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
-async function generateLongPlan(userMessage, feedback = null) {
-  const expectedDays = requestedDaysFromText(userMessage);
+async function generateLongPlan(userMessage, feedback = null, profile = null) {
+  const expectedDays = Number(profile?.days) || requestedDaysFromText(userMessage);
+  const structuredPreferences = profile ? profilePrompt(profile) : '';
   const feedbackText = feedback ? `\n\n修正要求：\n${feedback}` : '';
   let outlineResult;
   let outlineError;
@@ -327,7 +408,7 @@ async function generateLongPlan(userMessage, feedback = null) {
         : `\n\n上一次没有完整覆盖 ${expectedDays} 天。请压缩文字，并严格输出 Day 1 到 Day ${expectedDays}。`;
       outlineResult = await requestJsonWithRetry(
         LONG_OUTLINE_PROMPT,
-        `${userMessage}${feedbackText}${completenessHint}`,
+        `${userMessage}${structuredPreferences}${feedbackText}${completenessHint}`,
         { maxTokens: DEFAULT_MAX_TOKENS },
       );
       if (outlineResult.status === 'need_clarification') return outlineResult;
@@ -350,7 +431,7 @@ async function generateLongPlan(userMessage, feedback = null) {
     try {
       return await requestJsonWithRetry(
         DETAIL_PROMPT,
-        `【用户原需求】\n${userMessage}\n\n【不可更改的行程骨架】\n${JSON.stringify({ daily_plans: chunk })}`,
+        `【用户原需求】\n${userMessage}${structuredPreferences}\n\n【不可更改的行程骨架】\n${JSON.stringify({ daily_plans: chunk })}`,
         { maxTokens: 4096 },
       );
     } catch (error) {
@@ -365,20 +446,23 @@ async function generateLongPlan(userMessage, feedback = null) {
   outlineResult.plan.daily_plans = outlineResult.plan.daily_plans.map(day =>
     mergeDetailedDay(day, detailByDay.get(Number(day.day))),
   );
+  outlineResult.plan = normalizePlan(outlineResult.plan, expectedDays);
   assertCompleteDays(outlineResult.plan, expectedDays);
   return outlineResult;
 }
 
-export async function callLLM(userMessage, feedback = null) {
-  if (isLongTripRequest(userMessage)) {
-    console.log(`[LLM] 检测到 ${requestedDaysFromText(userMessage)} 天长行程，启用分段生成`);
-    return generateLongPlan(userMessage, feedback);
+export async function callLLM(userMessage, feedback = null, profile = null) {
+  const requestedDays = Number(profile?.days) || requestedDaysFromText(userMessage);
+  if (requestedDays >= LONG_TRIP_THRESHOLD_DAYS) {
+    console.log(`[LLM] 检测到 ${requestedDays} 天长行程，启用分段生成`);
+    return generateLongPlan(userMessage, feedback, profile);
   }
 
+  const structuredPreferences = profile ? profilePrompt(profile) : '';
   const userContent = feedback
-    ? `${userMessage}\n\n---\n${feedback}\n---\n请输出修正后的完整 JSON。`
-    : userMessage;
+    ? `${userMessage}${structuredPreferences}\n\n---\n${feedback}\n---\n请输出修正后的完整 JSON。`
+    : `${userMessage}${structuredPreferences}`;
   const result = await requestJsonWithRetry(SYSTEM_PROMPT, userContent, { maxTokens: DEFAULT_MAX_TOKENS });
-  if (result.plan) result.plan = normalizePlan(result.plan, requestedDaysFromText(userMessage));
+  if (result.plan) result.plan = normalizePlan(result.plan, requestedDays);
   return result;
 }
