@@ -7,28 +7,58 @@ export function getGoogleApiKey() {
   return key;
 }
 
-export async function googleJsonRequest(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 15000);
+function transientHttpStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
 
-  try {
-    const response = await fetch(url, {
-      ...options,
-      timeoutMs: undefined,
-      signal: controller.signal,
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || data.error) {
-      const message = data.error?.message || `Google Maps API 请求失败 (${response.status})`;
-      throw new Error(message);
+function transientNetworkError(error) {
+  if (error?.name === 'AbortError' || error?.name === 'TypeError') return true;
+  const code = String(error?.cause?.code || error?.code || '').toUpperCase();
+  return /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|UND_ERR_)/.test(code)
+    || /fetch failed|network|socket|timed? ?out/i.test(String(error?.message || ''));
+}
+
+function wait(ms) {
+  return ms > 0 ? new Promise(resolve => setTimeout(resolve, ms)) : Promise.resolve();
+}
+
+export async function googleJsonRequest(url, options = {}) {
+  const {
+    timeoutMs = 15000,
+    maxAttempts = 2,
+    retryDelayMs = 100,
+    ...fetchOptions
+  } = options;
+  const attempts = Math.max(1, Math.min(2, Number(maxAttempts) || 2));
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    // Each attempt owns its controller/timer; a timed-out signal is never reused.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { ...fetchOptions, signal: controller.signal });
+      const data = await response.json().catch(() => ({}));
+      const status = Number(data.error?.code) || response.status;
+      if (!response.ok || data.error) {
+        const error = new Error(data.error?.message || `Google Maps API 请求失败 (${response.status})`);
+        error.httpStatus = status;
+        error.retryable = transientHttpStatus(status);
+        throw error;
+      }
+      return data;
+    } catch (error) {
+      const timedOut = error?.name === 'AbortError';
+      const retryable = error?.retryable === true || transientNetworkError(error);
+      lastError = timedOut ? new Error('Google Maps API 请求超时') : error;
+      if (!retryable || attempt >= attempts) throw lastError;
+    } finally {
+      clearTimeout(timeout);
     }
-    return data;
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error('Google Maps API 请求超时');
-    throw error;
-  } finally {
-    clearTimeout(timeout);
+    await wait(retryDelayMs * attempt);
   }
+
+  throw lastError || new Error('Google Maps API 请求失败');
 }
 
 export async function geocodeAddress(address, languageCode = 'zh-CN') {

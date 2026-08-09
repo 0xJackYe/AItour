@@ -1,4 +1,9 @@
-import { cloneProfile, EMPTY_PROFILE } from './planModel.js';
+import {
+  cloneProfile,
+  DEFAULT_DISTANCE_POLICY,
+  EMPTY_PROFILE,
+  TRANSIT_MODE_OPTIONS,
+} from './planModel.js';
 
 export const FORM_DRAFT_STORAGE_KEY = 'aitour:form-draft:v1';
 const FORM_DRAFT_VERSION = 1;
@@ -20,6 +25,29 @@ export function normalizeFormDraft(value) {
   profile.transport.avoidModes = Array.isArray(profile.transport.avoidModes)
     ? profile.transport.avoidModes.filter(mode => typeof mode === 'string')
     : [...EMPTY_PROFILE.transport.avoidModes];
+  const transitPreferences = profile.transport.transitPreferences;
+  const validTransitModes = new Set(TRANSIT_MODE_OPTIONS);
+  transitPreferences.allowedModes = Array.isArray(transitPreferences.allowedModes)
+    ? [...new Set(transitPreferences.allowedModes
+      .map(mode => String(mode).toUpperCase())
+      .filter(mode => validTransitModes.has(mode)))]
+    : [...EMPTY_PROFILE.transport.transitPreferences.allowedModes];
+  if (!['', 'LESS_WALKING', 'FEWER_TRANSFERS'].includes(transitPreferences.routingPreference)) {
+    transitPreferences.routingPreference = '';
+  }
+  const normalizeThreshold = (field, min, max) => {
+    const numeric = Number(profile.transport.distancePolicy[field]);
+    if (!Number.isFinite(numeric)) return DEFAULT_DISTANCE_POLICY[field];
+    return Math.min(max, Math.max(min, numeric));
+  };
+  const walkMaxKm = normalizeThreshold('walkMaxKm', 0, 20);
+  const localTransitMaxKm = Math.max(walkMaxKm, normalizeThreshold('localTransitMaxKm', 1, 500));
+  const flightMinKm = Math.max(localTransitMaxKm + 1, normalizeThreshold('flightMinKm', 50, 20000));
+  profile.transport.distancePolicy = {
+    walkMaxKm,
+    localTransitMaxKm,
+    flightMinKm,
+  };
   return {
     query: typeof source.query === 'string' ? source.query.slice(0, MAX_QUERY_LENGTH) : '',
     profile,

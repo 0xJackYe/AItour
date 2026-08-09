@@ -78,6 +78,8 @@ export async function calculatePlanRoutes(plan, { routeProvider } = {}) {
       routeProvider,
       allowedModes: plan.profile?.transport?.allowedModes,
       avoidModes: plan.profile?.transport?.avoidModes,
+      transitPreferences: plan.profile?.transport?.transitPreferences,
+      distancePolicy: plan.profile?.transport?.distancePolicy,
       maxWalkingKm: plan.profile?.maxWalkingKm,
     });
     return [job.leg.id, route];

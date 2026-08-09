@@ -1,11 +1,27 @@
 const MODE_ALIASES = {
   walk: 'WALK', walking: 'WALK', '步行': 'WALK', '走路': 'WALK',
-  transit: 'TRANSIT', public_transport: 'TRANSIT', metro: 'TRANSIT', subway: 'TRANSIT', bus: 'TRANSIT', '公交': 'TRANSIT', '地铁': 'TRANSIT', '公共交通': 'TRANSIT',
+  transit: 'TRANSIT', public_transport: 'TRANSIT', metro: 'TRANSIT', subway: 'TRANSIT', bus: 'TRANSIT', '公交': 'TRANSIT', '巴士': 'TRANSIT', '大巴': 'TRANSIT', '地铁': 'TRANSIT', '公共交通': 'TRANSIT',
   drive: 'DRIVE', driving: 'DRIVE', car: 'DRIVE', taxi: 'DRIVE', '自驾': 'DRIVE', '出租车': 'DRIVE',
   bicycle: 'BICYCLE', bike: 'BICYCLE', cycling: 'BICYCLE', '骑行': 'BICYCLE', '自行车': 'BICYCLE',
-  rail: 'RAIL', train: 'RAIL', '火车': 'RAIL', '高铁': 'RAIL', '铁路': 'RAIL',
+  rail: 'RAIL', train: 'RAIL', '火车': 'RAIL', '列车': 'RAIL', '高铁': 'RAIL', '新干线': 'RAIL', '铁路': 'RAIL',
   flight: 'FLIGHT', plane: 'FLIGHT', air: 'FLIGHT', '飞机': 'FLIGHT', '航空': 'FLIGHT',
 };
+
+const TRANSIT_MODE_ALIASES = {
+  bus: 'BUS', coach: 'BUS', '公交': 'BUS', '巴士': 'BUS', '大巴': 'BUS',
+  subway: 'SUBWAY', metro: 'SUBWAY', underground: 'SUBWAY', '地铁': 'SUBWAY',
+  train: 'TRAIN', railway: 'TRAIN', '火车': 'TRAIN', '列车': 'TRAIN', '高铁': 'TRAIN', '新干线': 'TRAIN',
+  light_rail: 'LIGHT_RAIL', lightrail: 'LIGHT_RAIL', tram: 'LIGHT_RAIL', '轻轨': 'LIGHT_RAIL', '有轨电车': 'LIGHT_RAIL',
+  rail: 'RAIL', '铁路': 'RAIL', '轨道交通': 'RAIL',
+};
+
+const TRANSIT_MODES = ['BUS', 'SUBWAY', 'TRAIN', 'LIGHT_RAIL', 'RAIL'];
+const TRANSIT_ROUTING_PREFERENCES = new Set(['LESS_WALKING', 'FEWER_TRANSFERS']);
+const DEFAULT_DISTANCE_POLICY = Object.freeze({
+  walkMaxKm: 1,
+  localTransitMaxKm: 30,
+  flightMinKm: 800,
+});
 
 const PACE_ALIASES = {
   relaxed: 'relaxed', slow: 'relaxed', '轻松': 'relaxed', '休闲': 'relaxed', '慢': 'relaxed', '不赶': 'relaxed',
@@ -38,6 +54,13 @@ function valueFromAliases(value, aliases) {
 function positiveNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function boundedNumber(value, fallback, minimum, maximum) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(maximum, Math.max(minimum, number));
 }
 
 function normalizeTime(value, fallback) {
@@ -93,13 +116,43 @@ function inferTransport(query = '') {
     .filter(([alias]) => text.includes(alias))
     .map(([, mode]) => mode))];
   const priorityKey = Object.keys(PRIORITY_ALIASES).find(alias => text.includes(alias));
-  return { modes, priority: priorityKey ? PRIORITY_ALIASES[priorityKey] : null };
+  const transitModes = [...new Set(Object.entries(TRANSIT_MODE_ALIASES)
+    .filter(([alias]) => text.includes(alias))
+    .map(([, mode]) => mode))];
+  return { modes, transitModes, priority: priorityKey ? PRIORITY_ALIASES[priorityKey] : null };
 }
 
 function normalizeModes(values) {
   return [...new Set((Array.isArray(values) ? values : values ? [values] : [])
     .map(value => MODE_ALIASES[String(value).trim().toLowerCase()] || String(value).trim().toUpperCase())
     .filter(value => ['WALK', 'TRANSIT', 'DRIVE', 'BICYCLE', 'RAIL', 'FLIGHT'].includes(value)))];
+}
+
+function normalizeTransitModes(values, fallback = TRANSIT_MODES) {
+  const source = Array.isArray(values) ? values : values ? [values] : fallback;
+  const modes = [...new Set(source
+    .map(value => TRANSIT_MODE_ALIASES[String(value).trim().toLowerCase()] || String(value).trim().toUpperCase())
+    .filter(value => TRANSIT_MODES.includes(value)))];
+  return modes.length ? modes : [...fallback];
+}
+
+function normalizeRoutingPreference(value) {
+  const normalized = String(value || '').trim().toUpperCase();
+  return TRANSIT_ROUTING_PREFERENCES.has(normalized) ? normalized : null;
+}
+
+function normalizeDistancePolicy(value = {}) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const walkMaxKm = boundedNumber(raw.walkMaxKm, DEFAULT_DISTANCE_POLICY.walkMaxKm, 0, 20);
+  const localTransitMaxKm = Math.max(
+    walkMaxKm,
+    boundedNumber(raw.localTransitMaxKm, DEFAULT_DISTANCE_POLICY.localTransitMaxKm, 1, 500),
+  );
+  const flightMinKm = Math.max(
+    localTransitMaxKm,
+    boundedNumber(raw.flightMinKm, DEFAULT_DISTANCE_POLICY.flightMinKm, 50, 20000),
+  );
+  return { walkMaxKm, localTransitMaxKm, flightMinKm };
 }
 
 export function normalizeProfile(rawProfile = {}, query = '') {
@@ -110,6 +163,9 @@ export function normalizeProfile(rawProfile = {}, query = '') {
   const budget = raw.budget && typeof raw.budget === 'object' ? raw.budget : {};
   const travelers = raw.travelers && typeof raw.travelers === 'object' ? raw.travelers : {};
   const accommodation = raw.accommodation && typeof raw.accommodation === 'object' ? raw.accommodation : {};
+  const transitPreferences = transport.transitPreferences && typeof transport.transitPreferences === 'object'
+    ? transport.transitPreferences
+    : {};
   const allowedModes = normalizeModes(
     transport.allowedModes || raw.allowedModes || raw.transportModes || inferredTransport.modes,
   );
@@ -136,6 +192,15 @@ export function normalizeProfile(rawProfile = {}, query = '') {
       priority: valueFromAliases(transport.priority || raw.transportPriority, PRIORITY_ALIASES) || inferredTransport.priority,
       allowedModes: allowedModes.filter(mode => !avoidModes.includes(mode)),
       avoidModes,
+      transitPreferences: {
+        allowedModes: normalizeTransitModes(
+          transitPreferences.allowedModes || transport.transitModes || raw.transitModes || inferredTransport.transitModes,
+        ),
+        routingPreference: normalizeRoutingPreference(
+          transitPreferences.routingPreference || transport.routingPreference || raw.transitRoutingPreference,
+        ),
+      },
+      distancePolicy: normalizeDistancePolicy(transport.distancePolicy || raw.distancePolicy),
     },
     travelers: {
       adults: Math.max(0, Math.round(Number(travelers.adults ?? raw.adults ?? 1) || 0)),

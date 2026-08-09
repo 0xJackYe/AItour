@@ -11,6 +11,122 @@ function clockLabel(value) {
   return String(value || '').match(/(?:T|^)(\d{2}:\d{2})/)?.[1] || String(value || '');
 }
 
+function geometryPoint(value) {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const parseCoordinate = (coordinate, limit) => {
+    if (coordinate == null || typeof coordinate === 'boolean') return null;
+    if (typeof coordinate === 'string' && !coordinate.trim()) return null;
+    const numeric = Number(coordinate);
+    return Number.isFinite(numeric) && Math.abs(numeric) <= limit ? numeric : null;
+  };
+  const lat = parseCoordinate(value[0], 90);
+  const lng = parseCoordinate(value[1], 180);
+  return lat !== null && lng !== null ? { lat, lng } : null;
+}
+
+function distanceMeters(left, right) {
+  const a = geometryPoint(left);
+  const b = geometryPoint(right);
+  if (!a || !b) return null;
+  const toRad = value => (value * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const value = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.asin(Math.sqrt(value));
+}
+
+function hasValidGeometry(value) {
+  return Array.isArray(value) && value.length >= 2 && value.every(point => geometryPoint(point));
+}
+
+function vehicleMatchesPreference(vehicle, preferences) {
+  if (!preferences.size) return true;
+  const normalized = String(vehicle || '').toUpperCase();
+  const groups = {
+    BUS: new Set(['BUS', 'INTERCITY_BUS', 'TROLLEYBUS', 'SHARE_TAXI']),
+    SUBWAY: new Set(['SUBWAY', 'METRO_RAIL']),
+    TRAIN: new Set(['TRAIN', 'RAIL', 'COMMUTER_TRAIN', 'HEAVY_RAIL', 'HIGH_SPEED_TRAIN', 'LONG_DISTANCE_TRAIN']),
+    LIGHT_RAIL: new Set(['LIGHT_RAIL', 'TRAM', 'MONORAIL']),
+    RAIL: new Set(['SUBWAY', 'METRO_RAIL', 'TRAIN', 'RAIL', 'COMMUTER_TRAIN', 'HEAVY_RAIL', 'HIGH_SPEED_TRAIN', 'LONG_DISTANCE_TRAIN', 'LIGHT_RAIL', 'TRAM', 'MONORAIL']),
+  };
+  return [...preferences].some(preference => groups[preference]?.has(normalized));
+}
+
+function routeProviderBlockingIssue(route, context, path) {
+  if (route?.error_code === 'ROUTE_PROVIDER_ERROR') {
+    return issue(
+      'blocking',
+      'ROUTE_PROVIDER_ERROR',
+      `${context}的路线服务调用失败，无法确认是否存在可执行路线；请检查 API、配额或网络后重试`,
+      path,
+    );
+  }
+  if (route?.error_code === 'ROUTE_PROVIDER_RESPONSE_INVALID') {
+    return issue(
+      'blocking',
+      'ROUTE_PROVIDER_RESPONSE_INVALID',
+      `${context}的路线服务返回了无效响应或损坏几何，不能当作“无路线”继续使用`,
+      path,
+    );
+  }
+  return null;
+}
+
+function validateSegments(route, path, blockers, warnings, transitModePreferences) {
+  const segments = Array.isArray(route?.segments) ? route.segments : [];
+  if (route?.schedule_recheck_required) {
+    const representative = route.schedule_basis === 'representative';
+    warnings.push(issue(
+      'warning',
+      'TRANSIT_SCHEDULE_RECHECK_REQUIRED',
+      representative
+        ? '路线形态按同星期白天代表性时刻测算，该时刻不代表实际班次；请在临近出发时复核发车时间'
+        : '路线轨迹已验证；出行日期超出实时班次窗口，请在临近出发时复核发车时间',
+      path,
+    ));
+  }
+  if (!segments.length) {
+    if (['TRANSIT', 'RAIL'].includes(String(route?.mode || '').toUpperCase()) && route?.status === 'available') {
+      warnings.push(issue('warning', 'TRANSIT_DETAILS_MISSING', '真实路线已获取，但服务未返回可展示的线路与换乘详情', `${path}.segments`));
+    }
+    return 0;
+  }
+
+  let walkingDistance = 0;
+  segments.forEach((segment, index) => {
+    const segmentPath = `${path}.segments[${index}]`;
+    if (Number(segment.sequence) !== index) {
+      blockers.push(issue('blocking', 'ROUTE_SEGMENT_SEQUENCE_INVALID', '交通分段顺序不连续', `${segmentPath}.sequence`));
+    }
+    if (!hasValidGeometry(segment.geometry)) {
+      blockers.push(issue('blocking', 'ROUTE_SEGMENT_GEOMETRY_MISSING', '交通分段缺少真实几何', `${segmentPath}.geometry`));
+    }
+    const travelMode = String(segment.travel_mode || '').toUpperCase();
+    if (travelMode === 'WALK') walkingDistance += Number(segment.distance_meters) || 0;
+    if (travelMode === 'TRANSIT') {
+      if (!segment.transit_vehicle_type) {
+        blockers.push(issue('blocking', 'TRANSIT_VEHICLE_MISSING', '公共交通分段缺少具体车辆类型', `${segmentPath}.transit_vehicle_type`));
+      } else if (!vehicleMatchesPreference(segment.transit_vehicle_type, transitModePreferences)) {
+        warnings.push(issue(
+          'warning',
+          'TRANSIT_SUBMODE_FALLBACK',
+          `路线服务返回了偏好之外的 ${segment.transit_vehicle_type}，这是当前可执行路线的一部分`,
+          segmentPath,
+        ));
+      }
+    }
+    if (index > 0) {
+      const previousGeometry = segments[index - 1]?.geometry;
+      const gap = distanceMeters(previousGeometry?.at(-1), segment.geometry?.[0]);
+      if (gap !== null && gap > 2000) {
+        blockers.push(issue('blocking', 'ROUTE_SEGMENT_DISCONNECTED', `相邻交通分段存在约 ${Math.round(gap)}m 的未解释断点`, segmentPath));
+      }
+    }
+  });
+  return walkingDistance;
+}
+
 export function validatePlanHealth(plan, profile = plan?.profile || {}) {
   const blockers = [];
   const warnings = [];
@@ -35,6 +151,9 @@ export function validatePlanHealth(plan, profile = plan?.profile || {}) {
   let routeDuration = 0;
   const allowedModes = new Set((profile.transport?.allowedModes || []).map(mode => String(mode).toUpperCase()));
   const avoidedModes = new Set((profile.transport?.avoidModes || []).map(mode => String(mode).toUpperCase()));
+  const transitModePreferences = new Set(
+    (profile.transport?.transitPreferences?.allowedModes || []).map(mode => String(mode).toUpperCase()),
+  );
 
   if (!profile.startDate) {
     warnings.push(issue('warning', 'START_DATE_MISSING', '未提供开始日期；公共交通仅能按近期时刻测算，出发前需按实际日期复核', 'profile.startDate'));
@@ -92,11 +211,21 @@ export function validatePlanHealth(plan, profile = plan?.profile || {}) {
         routeDistance += Number(leg.distance_meters) || 0;
         routeDuration += Number(leg.duration_seconds) || 0;
         if (mode === 'WALK') walkingDistance += Number(leg.distance_meters) || 0;
-        if (!Array.isArray(leg.geometry) || leg.geometry.length < 2) {
+        else walkingDistance += validateSegments(leg, `${path}.legs[${legIndex}]`, blockers, warnings, transitModePreferences);
+        if (!hasValidGeometry(leg.geometry)) {
           blockers.push(issue('blocking', 'ROUTE_GEOMETRY_MISSING', `Day ${day.day} 的已可用路线缺少真实几何`, `${path}.legs[${legIndex}].geometry`));
         }
       } else if (leg.status === 'unavailable') {
-        blockers.push(issue('blocking', 'ROUTE_UNAVAILABLE', `Day ${day.day} 的 ${leg.mode || '未知'} 交通段无可用真实路线`, `${path}.legs[${legIndex}]`));
+        const legPath = `${path}.legs[${legIndex}]`;
+        blockers.push(routeProviderBlockingIssue(leg, `Day ${day.day} 的 ${leg.mode || '未知'} 交通段`, legPath)
+          || issue('blocking', 'ROUTE_UNAVAILABLE', `Day ${day.day} 的 ${leg.mode || '未知'} 交通段无可用真实路线`, legPath));
+      } else if (leg.status === 'needs_confirmation' && leg.provider_limit_code === 'GOOGLE_TRANSIT_JAPAN_UNSUPPORTED') {
+        warnings.push(issue(
+          'warning',
+          'TRANSIT_PROVIDER_LIMIT_CONFIRMATION_REQUIRED',
+          `Day ${day.day} 的日本公共交通段因 Google Routes 官方覆盖限制需在 Google Maps 中实时确认；当前距离与时长仅为估算`,
+          `${path}.legs[${legIndex}]`,
+        ));
       } else {
         warnings.push(issue('warning', 'ROUTE_NOT_CALCULATED', `Day ${day.day} 存在尚未计算的交通段`, `${path}.legs[${legIndex}]`));
       }
@@ -121,12 +250,42 @@ export function validatePlanHealth(plan, profile = plan?.profile || {}) {
         blockers.push(issue('blocking', 'DAY_CONNECTION_INVALID', `Day ${day.day} 的跨日连接引用无效`, `${path}.connection_to_next`));
       }
       if (day.connection_to_next.type === 'intercity') {
+        const connectionMode = String(day.connection_to_next.mode || '').toUpperCase();
+        if (avoidedModes.has(connectionMode) || (allowedModes.size && !allowedModes.has(connectionMode))) {
+          blockers.push(issue(
+            'blocking',
+            'TRANSPORT_PREFERENCE_VIOLATED',
+            `Day ${day.day} 到 Day ${next?.day || '?'} 使用了未获允许的 ${connectionMode || '未知'} 交通方式`,
+            `${path}.connection_to_next.mode`,
+          ));
+        }
         if (day.connection_to_next.status === 'needs_confirmation') {
-          warnings.push(issue('warning', 'INTERCITY_CONFIRMATION_REQUIRED', `Day ${day.day} 到 Day ${next?.day || '?'} 的 ${day.connection_to_next.mode} 跨城段需确认具体班次`, `${path}.connection_to_next`));
+          const providerLimited = day.connection_to_next.provider_limit_code === 'GOOGLE_TRANSIT_JAPAN_UNSUPPORTED';
+          warnings.push(issue(
+            'warning',
+            providerLimited ? 'TRANSIT_PROVIDER_LIMIT_CONFIRMATION_REQUIRED' : 'INTERCITY_CONFIRMATION_REQUIRED',
+            providerLimited
+              ? `Day ${day.day} 到 Day ${next?.day || '?'} 的日本公共交通因 Google Routes 官方覆盖限制，需通过 Google Maps 实时确认具体线路、换乘和班次；当前距离与时长仅为估算`
+              : `Day ${day.day} 到 Day ${next?.day || '?'} 的 ${day.connection_to_next.mode} 跨城段需确认具体班次`,
+            `${path}.connection_to_next`,
+          ));
         } else if (day.connection_to_next.status !== 'available') {
-          blockers.push(issue('blocking', 'INTERCITY_CONNECTION_UNAVAILABLE', `Day ${day.day} 到 Day ${next?.day || '?'} 的跨城交通尚未获得可执行路线`, `${path}.connection_to_next`));
-        } else if (!Array.isArray(day.connection_to_next.geometry) || day.connection_to_next.geometry.length < 2) {
+          const connectionPath = `${path}.connection_to_next`;
+          blockers.push(routeProviderBlockingIssue(
+            day.connection_to_next,
+            `Day ${day.day} 到 Day ${next?.day || '?'} 的跨城交通`,
+            connectionPath,
+          ) || issue('blocking', 'INTERCITY_CONNECTION_UNAVAILABLE', `Day ${day.day} 到 Day ${next?.day || '?'} 的跨城交通尚未获得可执行路线`, connectionPath));
+        } else if (!hasValidGeometry(day.connection_to_next.geometry)) {
           blockers.push(issue('blocking', 'INTERCITY_GEOMETRY_MISSING', `Day ${day.day} 的跨城路线缺少真实几何`, `${path}.connection_to_next.geometry`));
+        } else {
+          validateSegments(
+            day.connection_to_next,
+            `${path}.connection_to_next`,
+            blockers,
+            warnings,
+            transitModePreferences,
+          );
         }
       }
     }

@@ -7,9 +7,141 @@ function stableId(prefix, ...parts) {
 
 function coordinatesOf(value) {
   const coordinates = value?.coordinates || value;
-  const lat = Number(coordinates?.lat);
-  const lng = Number(coordinates?.lng);
-  return Number.isFinite(lat) && Number.isFinite(lng) ? { ...coordinates, lat, lng } : null;
+  const parseCoordinate = (coordinate, limit) => {
+    if (coordinate == null || typeof coordinate === 'boolean') return null;
+    if (typeof coordinate === 'string' && !coordinate.trim()) return null;
+    const numeric = Number(coordinate);
+    return Number.isFinite(numeric) && Math.abs(numeric) <= limit ? numeric : null;
+  };
+  const lat = parseCoordinate(Array.isArray(coordinates) ? coordinates[0] : coordinates?.lat, 90);
+  const lng = parseCoordinate(Array.isArray(coordinates) ? coordinates[1] : coordinates?.lng, 180);
+  return lat !== null && lng !== null ? { ...coordinates, lat, lng } : null;
+}
+
+const CONNECTION_CONFIRMATION_NOTICE = '该方案仅作参考，具体线路、换乘和班次请在临近出发时通过 Google Maps 实时确认。';
+const LOCATION_ALIAS_GROUPS = [
+  ['大阪', 'osaka'],
+  ['京都', 'kyoto'],
+  ['富士山', '富士吉田', '富士河口湖', '河口湖', '忍野', 'fujisan', 'fujiyoshida', 'fujikawaguchiko', 'kawaguchiko', 'oshino'],
+  ['东京', '東京', '新宿', 'tokyo', 'shinjuku'],
+];
+
+function normalizedLocationText(value) {
+  return String(value || '').normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+}
+
+function aliasesForLocation(value) {
+  const normalized = normalizedLocationText(value);
+  const group = LOCATION_ALIAS_GROUPS.find(items => items.some(item => normalized.includes(normalizedLocationText(item))));
+  return group || [value];
+}
+
+function noteReferencesLocation(note, value) {
+  const text = normalizedLocationText(note);
+  return aliasesForLocation(value).some(alias => text.includes(normalizedLocationText(alias)));
+}
+
+function isSpecificConnectionNote(note, fromCity, toCity) {
+  const text = String(note || '').trim();
+  if (!text || !noteReferencesLocation(text, fromCity) || !noteReferencesLocation(text, toCity)) return false;
+  const hasStation = /(站|駅|station|机场|機場|airport|码头|碼頭|terminal)/i.test(text);
+  const hasConcreteMode = /(?:\b(?:jr|shinkansen|rail|train|bus|metro|subway|flight|ferry|tram|line)\b|[A-Za-z0-9]{1,8}\s*(?:线|線)|新干线|新幹線|列车|列車|特急|铁路|鐵路|巴士|公交|地铁|地鐵|航班|轮渡|輪渡)/iu.test(text);
+  return hasStation && hasConcreteMode;
+}
+
+function matchesLocation(value, candidates) {
+  const aliases = aliasesForLocation(value).map(normalizedLocationText);
+  return candidates.some(candidate => aliases.includes(normalizedLocationText(candidate)));
+}
+
+function withConfirmationNotice(note) {
+  const text = String(note || '').trim();
+  if (!text) return CONNECTION_CONFIRMATION_NOTICE;
+  return /Google Maps|临近出发|臨近出發|实时确认|實時確認/i.test(text)
+    ? text
+    : `${text}${/[。！？.!?]$/.test(text) ? '' : '。'}${CONNECTION_CONFIRMATION_NOTICE}`;
+}
+
+function isJapanCountry(value) {
+  return ['日本', 'jp', 'jpn', 'japan'].includes(normalizedLocationText(value));
+}
+
+function noteMatchesTransportPreference(note, mode, profile = {}) {
+  const text = String(note || '');
+  const normalizedMode = String(mode || '').toUpperCase();
+  const mentionsRail = /(?:\b(?:jr|shinkansen|rail|train)\b|新干线|新幹線|列车|列車|特急|铁路|鐵路|富士急行)/iu.test(text);
+  const mentionsBus = /(?:\bbus\b|巴士|公交)/iu.test(text);
+  const mentionsSubway = /(?:\b(?:metro|subway)\b|地铁|地鐵)/iu.test(text);
+  const mentionsLightRail = /(?:\b(?:light\s*rail|tram)\b|轻轨|輕軌|路面电车|路面電車)/iu.test(text);
+  const mentionsFlight = /(?:\bflight\b|航班|飞机|飛機|机场|機場|airport)/iu.test(text);
+  const mentionsDrive = /(?:\b(?:drive|car|taxi)\b|驾车|駕車|自驾|自駕|出租车|出租車|汽车|汽車)/iu.test(text);
+  const mentionsWalk = /(?:\bwalk(?:ing)?\b|步行)/iu.test(text);
+  const mentionsBicycle = /(?:\b(?:bicycle|bike|cycling)\b|骑行|騎行|自行车|自行車)/iu.test(text);
+  const mentionsTransit = mentionsRail || mentionsBus || mentionsSubway || mentionsLightRail;
+
+  if (normalizedMode === 'DRIVE') return mentionsDrive && !mentionsTransit && !mentionsFlight;
+  if (normalizedMode === 'FLIGHT') return mentionsFlight;
+  if (normalizedMode === 'WALK') return mentionsWalk && !mentionsTransit && !mentionsDrive;
+  if (normalizedMode === 'BICYCLE') return mentionsBicycle && !mentionsTransit && !mentionsDrive;
+  if (!['RAIL', 'TRANSIT'].includes(normalizedMode) || !mentionsTransit) return false;
+
+  const configured = new Set((profile?.transport?.transitPreferences?.allowedModes || [])
+    .map(item => String(item || '').toUpperCase()));
+  if (!configured.size) return normalizedMode !== 'RAIL' || mentionsRail;
+  const railAllowed = ['TRAIN', 'RAIL'].some(item => configured.has(item));
+  if (mentionsRail && !railAllowed) return false;
+  if (mentionsBus && !configured.has('BUS')) return false;
+  if (mentionsSubway && !configured.has('SUBWAY') && !configured.has('RAIL')) return false;
+  if (mentionsLightRail && !configured.has('LIGHT_RAIL') && !configured.has('RAIL')) return false;
+  return normalizedMode !== 'RAIL' || mentionsRail;
+}
+
+function buildConnectionAdvisory(day, next, from, to, mode, profile = {}) {
+  const currentNote = String(day?.connection_to_next_notes || '').trim();
+  if (isSpecificConnectionNote(currentNote, day?.city, next?.city)
+    && noteMatchesTransportPreference(currentNote, mode, profile)) return withConfirmationNotice(currentNote);
+
+  const misplaced = String(next?.connection_to_next_notes || '').trim();
+  if (isSpecificConnectionNote(misplaced, day?.city, next?.city)
+    && noteMatchesTransportPreference(misplaced, mode, profile)) return withConfirmationNotice(misplaced);
+
+  const fromCity = day?.city || '出发城市';
+  const toCity = next?.city || '到达城市';
+  const fromJapan = isJapanCountry(day?.country);
+  const toJapan = isJapanCountry(next?.country);
+  const transitMode = mode === 'RAIL' || mode === 'TRANSIT';
+  const configuredSubModes = (profile?.transport?.transitPreferences?.allowedModes || [])
+    .map(item => String(item || '').toUpperCase());
+  const allowsAllTransit = configuredSubModes.length === 0;
+  const supportsRail = transitMode && (mode === 'RAIL' || allowsAllTransit
+    || configuredSubModes.some(item => ['TRAIN', 'RAIL', 'LIGHT_RAIL'].includes(item)));
+  const supportsBus = transitMode && (allowsAllTransit || configuredSubModes.includes('BUS'));
+  const isOsaka = matchesLocation(fromCity, ['大阪', 'osaka']);
+  const isKyoto = matchesLocation(toCity, ['京都', 'kyoto']);
+  const fromKyoto = matchesLocation(fromCity, ['京都', 'kyoto']);
+  const toFuji = matchesLocation(toCity, ['富士山', '富士吉田', '富士河口湖', '河口湖', '忍野', 'fujisan', 'fujiyoshida', 'fujikawaguchiko', 'kawaguchiko', 'oshino']);
+  const fromFuji = matchesLocation(fromCity, ['富士山', '富士吉田', '富士河口湖', '河口湖', '忍野', 'fujisan', 'fujiyoshida', 'fujikawaguchiko', 'kawaguchiko', 'oshino']);
+  const toTokyo = matchesLocation(toCity, ['东京', '東京', '新宿', 'tokyo', 'shinjuku']);
+
+  if (fromJapan && toJapan && supportsRail && isOsaka && isKyoto) {
+    return `大阪→京都参考：从住宿先前往大阪站，优先乘 JR 京都线新快速直达京都站；若从新大阪站出发，也可核对东海道新干线。抵达京都站后再前往住宿。${CONNECTION_CONFIRMATION_NOTICE}`;
+  }
+  if (fromJapan && toJapan && supportsRail && supportsBus && fromKyoto && toFuji) {
+    return `京都→富士山/河口湖参考：从京都站乘东海道新干线到三岛站，再换乘富士急巴士或高速巴士前往富士山站/河口湖站。${CONNECTION_CONFIRMATION_NOTICE}`;
+  }
+  if (fromJapan && toJapan && supportsBus && fromFuji && toTokyo) {
+    const railAlternative = supportsRail ? '；铁路备选为乘富士急行线到大月站，再换乘 JR 中央线前往新宿/东京' : '';
+    return `富士山/河口湖→东京参考：优先从河口湖站或富士山站乘新宿高速巴士到新宿${railAlternative}。${CONNECTION_CONFIRMATION_NOTICE}`;
+  }
+
+  const fromStop = from?.name || `${fromCity}主要交通枢纽`;
+  const toStop = to?.name || `${toCity}主要交通枢纽`;
+  const modeText = mode === 'FLIGHT' ? '航班及两端机场接驳'
+    : mode === 'RAIL' ? '城际铁路及必要接驳'
+      : mode === 'TRANSIT' ? '公共交通'
+        : mode === 'DRIVE' ? '道路交通'
+          : '可用交通方式';
+  return `${fromCity}→${toCity}参考：从${fromStop}前往${toStop}，优先核对${modeText}的真实可用方案。${CONNECTION_CONFIRMATION_NOTICE}`;
 }
 
 function haversineKm(left, right) {
@@ -31,39 +163,64 @@ function allowedModes(profile) {
   return (configured.length ? configured : fallback).filter(mode => !avoided.has(mode));
 }
 
+function distancePolicy(profile = {}) {
+  const configured = profile?.transport?.distancePolicy || {};
+  const walkMaxKm = Number.isFinite(Number(configured.walkMaxKm)) ? Number(configured.walkMaxKm) : 1;
+  const localTransitMaxKm = Number.isFinite(Number(configured.localTransitMaxKm))
+    ? Number(configured.localTransitMaxKm)
+    : 30;
+  const flightMinKm = Number.isFinite(Number(configured.flightMinKm)) ? Number(configured.flightMinKm) : 800;
+  return { walkMaxKm, localTransitMaxKm, flightMinKm };
+}
+
 export function selectLegMode(from, to, profile = {}) {
   const allowed = allowedModes(profile);
   const crossCity = Boolean(from?.city && to?.city && from.city !== to.city);
   const priority = profile?.transport?.priority || 'balanced';
   const distanceKm = haversineKm(from, to);
+  const policy = distancePolicy(profile);
+  const longDistance = distanceKm !== null && distanceKm >= policy.flightMinKm;
+  const localDistance = distanceKm !== null && distanceKm <= policy.localTransitMaxKm;
+
+  const selectAllowed = ordered => ordered.find(item => allowed.includes(item)) || allowed[0] || 'UNKNOWN';
 
   if (crossCity) {
-    const ordered = priority === 'rail'
-      ? ['RAIL', 'TRANSIT', 'DRIVE', 'FLIGHT']
-      : priority === 'time'
-        ? ['FLIGHT', 'RAIL', 'DRIVE', 'TRANSIT']
-        : priority === 'cost'
-          ? ['RAIL', 'TRANSIT', 'DRIVE', 'FLIGHT']
-          : ['RAIL', 'FLIGHT', 'TRANSIT', 'DRIVE'];
-    const mode = ordered.find(item => allowed.includes(item)) || allowed[0] || 'UNKNOWN';
-    return { mode, reason: `跨城路段，按“${priority}”交通优先级选择`, distanceKm };
+    const ordered = localDistance
+      ? ['TRANSIT', 'RAIL', 'DRIVE', 'FLIGHT']
+      : longDistance && ['time', 'comfort'].includes(priority)
+        ? ['FLIGHT', 'RAIL', 'TRANSIT', 'DRIVE']
+        : priority === 'time'
+          ? ['RAIL', 'FLIGHT', 'TRANSIT', 'DRIVE']
+          : priority === 'cost'
+            ? ['RAIL', 'TRANSIT', 'DRIVE', 'FLIGHT']
+            : priority === 'rail'
+              ? ['RAIL', 'TRANSIT', 'DRIVE', 'FLIGHT']
+              : ['RAIL', 'TRANSIT', 'FLIGHT', 'DRIVE'];
+    const mode = selectAllowed(ordered);
+    const distanceReason = localDistance ? `距离约 ${distanceKm.toFixed(1)}km，优先城际公共交通`
+      : longDistance ? `距离约 ${distanceKm.toFixed(0)}km，已允许比较飞机与铁路`
+        : distanceKm === null ? '跨城距离待路线服务确认' : `距离约 ${distanceKm.toFixed(0)}km，优先铁路衔接`;
+    return { mode, reason: `${distanceReason}；按“${priority}”优先级选择`, distanceKm };
   }
 
-  // maxWalkingKm 是全日步行上限，单段只允许使用其中一部分。
+  // maxWalkingKm 是全日上限；distancePolicy.walkMaxKm 是用户明确的单段距离规则。
   const dailyWalkingLimit = Number(profile?.maxWalkingKm) || 4.5;
-  const normalSingleLegLimit = Math.min(1.5, Math.max(0.3, dailyWalkingLimit / 3));
+  const normalSingleLegLimit = Math.min(policy.walkMaxKm, Math.max(0, dailyWalkingLimit / 3));
   const maxWalk = priority === 'walking' ? Math.min(0.3, normalSingleLegLimit) : normalSingleLegLimit;
   if (allowed.includes('WALK') && distanceKm !== null && distanceKm <= maxWalk) {
     return { mode: 'WALK', reason: `距离约 ${distanceKm.toFixed(1)}km，未超过单段步行偏好`, distanceKm };
   }
-  const preferred = priority === 'walking' ? 'DRIVE'
+  const preferred = !localDistance && allowed.includes('RAIL') ? 'RAIL'
+    : priority === 'walking' ? 'DRIVE'
     : priority === 'transit' || priority === 'cost' ? 'TRANSIT'
       : priority === 'time' || priority === 'comfort' ? 'DRIVE'
         : 'TRANSIT';
-  const mode = [preferred, 'TRANSIT', 'DRIVE', 'BICYCLE', 'WALK'].find(item => allowed.includes(item))
-    || allowed[0]
-    || 'UNKNOWN';
-  return { mode, reason: `按“${priority}”交通优先级与允许方式选择`, distanceKm };
+  const mode = selectAllowed([preferred, 'TRANSIT', 'RAIL', 'DRIVE', 'BICYCLE', 'WALK']);
+  return {
+    mode,
+    reason: `${distanceKm === null ? '距离待路线服务确认' : `距离约 ${distanceKm.toFixed(1)}km`}；按“${priority}”优先级与距离规则选择`,
+    distanceKm,
+  };
 }
 
 function estimatedDurationSeconds(mode, distanceKm) {
@@ -114,6 +271,8 @@ function accommodationForDay(plan, day) {
 
 function makeAnchor(tripId, day, accommodation, role) {
   const suffix = role === 'start' ? '当日住宿出发' : '返回当日住宿';
+  const placeId = accommodation.place_id || accommodation.placeId
+    || accommodation.coordinates?.place_id || accommodation.coordinates?.placeId || null;
   return {
     id: stableId('node', tripId, day.day, role, accommodation.landmark || accommodation.area),
     type: 'hotel',
@@ -125,6 +284,8 @@ function makeAnchor(tripId, day, accommodation, role) {
     duration_minutes: 0,
     description: suffix,
     locked: true,
+    place_id: placeId,
+    placeId,
     coordinates: coordinatesOf(accommodation),
   };
 }
@@ -348,6 +509,9 @@ export function buildExecutableItinerary(sourcePlan, profile = {}) {
         ),
         duration_seconds: sameCity ? null : estimatedDuration,
         overnight_before_departure: true,
+        advisory_text: sameCity
+          ? null
+          : buildConnectionAdvisory(day, next, from, to, selected.mode, profile),
       },
     };
   });
@@ -380,6 +544,13 @@ export function applyLegRoutes(plan, routeResults = new Map(), profile = plan.pr
       distance_meters: retainedDistance,
       estimated: retainedEstimate,
       geometry: route.geometry || null,
+      segments: Array.isArray(route.segments)
+        ? route.segments.map((segment, index) => ({
+            ...segment,
+            id: `${leg.id}:segment:${index + 1}`,
+            sequence: index,
+          }))
+        : [],
     };
   };
   const dailyPlans = (plan.daily_plans || []).map(day => {
@@ -428,6 +599,16 @@ export function flattenRoutes(plan) {
         travel_mode: leg.mode,
         points: [coordinatesOf(from), coordinatesOf(to)].filter(Boolean).map(point => [point.lat, point.lng]),
         geometry: leg.geometry,
+        segments: leg.segments || [],
+        summary: leg.summary || null,
+        primary_vehicle: leg.primary_vehicle || null,
+        transfers: leg.transfers ?? null,
+        schedule_recheck_required: leg.schedule_recheck_required === true,
+        schedule_basis: leg.schedule_basis || null,
+        external_directions_url: leg.external_directions_url || null,
+        provider_limit_code: leg.provider_limit_code || null,
+        advisory_text: leg.advisory_text || null,
+        attribution: leg.attribution || null,
         distance_meters: leg.distance_meters,
         duration_seconds: leg.duration_seconds,
         from_node_id: leg.from_node_id,
@@ -449,6 +630,16 @@ export function flattenRoutes(plan) {
         travel_mode: connection.mode,
         points: [coordinatesOf(from), coordinatesOf(to)].filter(Boolean).map(point => [point.lat, point.lng]),
         geometry: connection.geometry,
+        segments: connection.segments || [],
+        summary: connection.summary || null,
+        primary_vehicle: connection.primary_vehicle || null,
+        transfers: connection.transfers ?? null,
+        schedule_recheck_required: connection.schedule_recheck_required === true,
+        schedule_basis: connection.schedule_basis || null,
+        external_directions_url: connection.external_directions_url || null,
+        provider_limit_code: connection.provider_limit_code || null,
+        advisory_text: connection.advisory_text || null,
+        attribution: connection.attribution || null,
         distance_meters: connection.distance_meters,
         duration_seconds: connection.duration_seconds,
         from_node_id: connection.from_node_id,

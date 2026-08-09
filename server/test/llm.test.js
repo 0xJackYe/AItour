@@ -31,6 +31,7 @@ function buildOutline() {
   const dailyPlans = Array.from({ length: 28 }, (_, index) => {
     const day = index + 1;
     const destination = destinations.find(item => item.start_day <= day && item.end_day >= day);
+    const nextDestination = destinations.find(item => item.start_day <= day + 1 && item.end_day >= day + 1);
     return {
       day,
       city: destination.city,
@@ -41,6 +42,9 @@ function buildOutline() {
         { name: `${destination.city}博物馆${day}`, name_en: `${destination.city} Museum ${day}`, type: 'attraction' },
       ],
       transport_notes: '使用火车和市内公共交通。',
+      connection_to_next_notes: nextDestination && nextDestination.city !== destination.city
+        ? `${destination.city}中央站乘跨城列车前往${nextDestination.city}中央站，班次临近出发复核。`
+        : null,
     };
   });
   return {
@@ -83,6 +87,43 @@ test('单城市计划不能通过篡改 spot.city 绕过目标城市约束', () 
   assert.equal(plan.daily_plans[0].spots[0].city, '东京');
 });
 
+test('normalizePlan 保守纠正被放到到达日的跨城说明', () => {
+  const plan = normalizePlan({
+    city: '多城市', country: '日本', days: 4,
+    daily_plans: [
+      { day: 1, city: '京都', country: '日本', connection_to_next_notes: null, spots: [{ city: '京都' }] },
+      { day: 2, city: '河口湖', country: '日本', connection_to_next_notes: '京都站乘新干线和巴士前往河口湖站', spots: [{ city: '河口湖' }] },
+      { day: 3, city: '河口湖', country: '日本', connection_to_next_notes: null, spots: [{ city: '河口湖' }] },
+      { day: 4, city: '东京', country: '日本', connection_to_next_notes: '河口湖站乘富士回游前往东京新宿站', spots: [{ city: '东京' }] },
+    ],
+  });
+  assert.match(plan.daily_plans[0].connection_to_next_notes, /京都.*河口湖/);
+  assert.equal(plan.daily_plans[1].connection_to_next_notes, null);
+  assert.match(plan.daily_plans[2].connection_to_next_notes, /河口湖.*东京/);
+  assert.equal(plan.daily_plans[3].connection_to_next_notes, null);
+});
+
+test('normalizePlan 不覆盖正确跨城说明，也不误移一日多城说明', () => {
+  const correct = normalizePlan({
+    city: '多城市', country: '日本', days: 2,
+    daily_plans: [
+      { day: 1, city: '大阪', country: '日本', connection_to_next_notes: '大阪站乘JR到京都站', spots: [{ city: '大阪' }] },
+      { day: 2, city: '京都', country: '日本', connection_to_next_notes: '不应覆盖前一日', spots: [{ city: '京都' }] },
+    ],
+  });
+  assert.equal(correct.daily_plans[0].connection_to_next_notes, '大阪站乘JR到京都站');
+
+  const multiCityDay = normalizePlan({
+    city: '多城市', country: '日本', days: 2,
+    daily_plans: [
+      { day: 1, city: '京都', country: '日本', connection_to_next_notes: null, spots: [{ city: '京都' }, { city: '大阪' }] },
+      { day: 2, city: '大阪', country: '日本', connection_to_next_notes: '京都和大阪的一日移动说明', spots: [{ city: '大阪' }] },
+    ],
+  });
+  assert.equal(multiCityDay.daily_plans[0].connection_to_next_notes, null);
+  assert.equal(multiCityDay.daily_plans[1].connection_to_next_notes, '京都和大阪的一日移动说明');
+});
+
 test('长行程按段细化后仍完整保留 28 天和逐日城市上下文', async () => {
   const originalFetch = global.fetch;
   const outline = buildOutline();
@@ -92,6 +133,9 @@ test('长行程按段细化后仍完整保留 28 天和逐日城市上下文', a
     callCount++;
     const request = JSON.parse(options.body);
     const system = request.messages[0].content;
+    assert.match(system, /connection_to_next_notes/);
+    assert.match(system, /具体.*(?:线路|车辆).*换乘点/s);
+    assert.match(system, /禁止只写“公共交通”“火车”/);
     if (system.includes('长途旅行路线架构师')) return completion(outline);
 
     const user = request.messages[1].content;
@@ -117,6 +161,8 @@ test('长行程按段细化后仍完整保留 28 天和逐日城市上下文', a
     assert.deepEqual(result.plan.daily_plans.map(day => day.day), Array.from({ length: 28 }, (_, i) => i + 1));
     assert.ok(result.plan.daily_plans.every(day => day.city && day.country));
     assert.ok(result.plan.daily_plans.every(day => day.spots.every(spot => spot.description)));
+    assert.match(result.plan.daily_plans[4].connection_to_next_notes, /贝尔格莱德.*萨拉热窝/);
+    assert.equal(result.plan.daily_plans[0].connection_to_next_notes, null);
     assert.equal(callCount, 5, '应为一次骨架请求和四次 7 天细化请求');
   } finally {
     global.fetch = originalFetch;

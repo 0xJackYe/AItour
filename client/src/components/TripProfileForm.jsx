@@ -7,13 +7,23 @@ const MODE_OPTIONS = [
   ['FLIGHT', '飞机'],
 ];
 
-function NumberField({ label, value, min = 0, onChange, disabled }) {
+const TRANSIT_OPTIONS = [
+  ['BUS', '公交车 / 巴士'],
+  ['SUBWAY', '地铁'],
+  ['TRAIN', '普通火车'],
+  ['LIGHT_RAIL', '轻轨 / 有轨电车'],
+  ['RAIL', '城际铁路 / 新干线'],
+];
+
+function NumberField({ label, value, min = 0, max, step = 1, onChange, disabled }) {
   return (
     <label className="profile-field">
       <span>{label}</span>
       <input
         type="number"
         min={min}
+        max={max}
+        step={step}
         value={value ?? ''}
         onChange={(event) => onChange(event.target.value === '' ? '' : Number(event.target.value))}
         disabled={disabled}
@@ -22,12 +32,13 @@ function NumberField({ label, value, min = 0, onChange, disabled }) {
   );
 }
 
-function ModeChecks({ title, values = [], onToggle, disabled }) {
+function ModeChecks({ title, values = [], onToggle, disabled, options = MODE_OPTIONS, description }) {
   return (
     <fieldset className="profile-fieldset">
       <legend>{title}</legend>
+      {description && <p className="fieldset-description">{description}</p>}
       <div className="check-chip-list">
-        {MODE_OPTIONS.map(([value, label]) => (
+        {options.map(([value, label]) => (
           <label className={`check-chip ${values.includes(value) ? 'checked' : ''}`} key={value}>
             <input
               type="checkbox"
@@ -49,6 +60,16 @@ export default function TripProfileForm({ profile, onChange, disabled = false })
     ...current,
     [key]: { ...(current[key] || {}), [field]: value },
   }));
+  const updateTransportPreference = (key, field, value) => onChange(current => ({
+    ...current,
+    transport: {
+      ...(current.transport || {}),
+      [key]: {
+        ...(current.transport?.[key] || {}),
+        [field]: value,
+      },
+    },
+  }));
   const updateModes = (field, mode) => {
     onChange(current => {
       const otherField = field === 'allowedModes' ? 'avoidModes' : 'allowedModes';
@@ -68,6 +89,9 @@ export default function TripProfileForm({ profile, onChange, disabled = false })
     });
   };
   const interestsText = (profile.interests || []).join('、');
+  const distancePolicy = profile.transport?.distancePolicy || {};
+  const invalidDistancePolicy = Number(distancePolicy.localTransitMaxKm) < Number(distancePolicy.walkMaxKm)
+    || Number(distancePolicy.flightMinKm) <= Number(distancePolicy.localTransitMaxKm);
 
   return (
     <div className="trip-profile-form">
@@ -199,6 +223,73 @@ export default function TripProfileForm({ profile, onChange, disabled = false })
             onToggle={mode => updateModes('avoidModes', mode)}
             disabled={disabled}
           />
+
+          <section className="profile-subsection transport-policy-section" aria-labelledby="distance-policy-title">
+            <div className="profile-subsection-heading">
+              <h4 id="distance-policy-title">按距离选择交通</h4>
+              <span>后端会结合实际路线和你的总体优先级选择最优方案</span>
+            </div>
+            <div className="profile-grid distance-policy-grid">
+              <NumberField
+                label="这个距离以内优先步行（km）"
+                value={distancePolicy.walkMaxKm}
+                min={0}
+                max={20}
+                step={0.1}
+                onChange={value => updateTransportPreference('distancePolicy', 'walkMaxKm', value)}
+                disabled={disabled}
+              />
+              <NumberField
+                label="这个距离以内优先市内公交（km）"
+                value={distancePolicy.localTransitMaxKm}
+                min={0.1}
+                max={500}
+                step={0.1}
+                onChange={value => updateTransportPreference('distancePolicy', 'localTransitMaxKm', value)}
+                disabled={disabled}
+              />
+              <NumberField
+                label="超过这个距离可优先考虑飞机（km）"
+                value={distancePolicy.flightMinKm}
+                min={50}
+                max={20000}
+                step={10}
+                onChange={value => updateTransportPreference('distancePolicy', 'flightMinKm', value)}
+                disabled={disabled}
+              />
+            </div>
+            {invalidDistancePolicy && (
+              <p className="field-validation" role="alert">距离阈值应按“步行 → 市内公交 → 飞机”递增。</p>
+            )}
+          </section>
+
+          <ModeChecks
+            title="公共交通工具偏好"
+            description="可多选；计划会显示实际公交、地铁、火车或轻轨线路。"
+            options={TRANSIT_OPTIONS}
+            values={profile.transport?.transitPreferences?.allowedModes || []}
+            onToggle={mode => {
+              const values = profile.transport?.transitPreferences?.allowedModes || [];
+              updateTransportPreference(
+                'transitPreferences',
+                'allowedModes',
+                values.includes(mode) ? values.filter(item => item !== mode) : [...values, mode],
+              );
+            }}
+            disabled={disabled}
+          />
+          <label className="profile-field routing-preference-field">
+            <span>公共交通路线偏好</span>
+            <select
+              value={profile.transport?.transitPreferences?.routingPreference || ''}
+              onChange={event => updateTransportPreference('transitPreferences', 'routingPreference', event.target.value)}
+              disabled={disabled}
+            >
+              <option value="">综合平衡</option>
+              <option value="LESS_WALKING">少步行</option>
+              <option value="FEWER_TRANSFERS">少换乘</option>
+            </select>
+          </label>
 
           <div className="profile-grid">
             <NumberField label="每天最多步行（km）" value={profile.maxWalkingKm} onChange={value => update('maxWalkingKm', value)} disabled={disabled} />

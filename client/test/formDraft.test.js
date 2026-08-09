@@ -26,7 +26,11 @@ test('完整表单草稿可以保存并恢复嵌套偏好', () => {
       days: 3,
       startDate: '2026-10-03',
       budget: { level: 'moderate', amount: 3000, currency: 'CNY', basis: 'total', hardLimit: true },
-      transport: { priority: 'time', allowedModes: ['TRANSIT'], avoidModes: ['DRIVE'] },
+      transport: {
+        priority: 'time', allowedModes: ['TRANSIT'], avoidModes: ['DRIVE'],
+        transitPreferences: { allowedModes: ['SUBWAY', 'TRAIN'], routingPreference: 'FEWER_TRANSFERS' },
+        distancePolicy: { walkMaxKm: 0.8, localTransitMaxKm: 25, flightMinKm: 700 },
+      },
       travelers: { adults: 2, children: 1, seniors: 0 },
       notes: '需要安静房间',
     },
@@ -53,6 +57,10 @@ test('缺字段草稿会补齐当前默认结构', () => {
   assert.equal(restored.profile.days, 1);
   assert.equal(restored.profile.budget.currency, 'CNY');
   assert.ok(restored.profile.transport.allowedModes.includes('RAIL'));
+  assert.deepEqual(restored.profile.transport.transitPreferences.allowedModes, ['BUS', 'SUBWAY', 'TRAIN', 'LIGHT_RAIL', 'RAIL']);
+  assert.deepEqual(restored.profile.transport.distancePolicy, {
+    walkMaxKm: 1, localTransitMaxKm: 30, flightMinKm: 800,
+  });
 });
 
 test('字段类型损坏的草稿不会让表单渲染崩溃', () => {
@@ -74,6 +82,31 @@ test('字段类型损坏的草稿不会让表单渲染崩溃', () => {
   assert.deepEqual(restored.profile.interests, []);
   assert.doesNotThrow(() => restored.profile.transport.allowedModes.includes('WALK'));
   assert.doesNotThrow(() => restored.profile.transport.avoidModes.filter(Boolean));
+});
+
+test('异常的公交子方式和距离阈值会安全规范化', () => {
+  const storage = memoryStorage();
+  storage.setItem(FORM_DRAFT_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    draft: {
+      profile: {
+        transport: {
+          transitPreferences: {
+            allowedModes: ['subway', 'TRAIN', 'TELEPORT', 'SUBWAY'],
+            routingPreference: 'INVALID',
+          },
+          distancePolicy: { walkMaxKm: -1, localTransitMaxKm: '20', flightMinKm: 'bad' },
+        },
+      },
+    },
+  }));
+  const restored = loadFormDraft(storage);
+  assert.deepEqual(restored.profile.transport.transitPreferences, {
+    allowedModes: ['SUBWAY', 'TRAIN'], routingPreference: '',
+  });
+  assert.deepEqual(restored.profile.transport.distancePolicy, {
+    walkMaxKm: 0, localTransitMaxKm: 20, flightMinKm: 800,
+  });
 });
 
 test('损坏或不可用的存储会安全回退为空表单', () => {

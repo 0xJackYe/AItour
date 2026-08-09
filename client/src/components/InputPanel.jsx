@@ -49,7 +49,11 @@ export default function InputPanel({
   ]), [profile, query]);
   const completedRequired = requiredChecks.filter(Boolean).length;
   const completion = Math.round((completedRequired / requiredChecks.length) * 100);
-  const canSubmit = completedRequired === requiredChecks.length && !loading;
+  const distancePolicy = profile.transport?.distancePolicy || {};
+  const distancePolicyValid = Number(distancePolicy.walkMaxKm) >= 0
+    && Number(distancePolicy.localTransitMaxKm) >= Number(distancePolicy.walkMaxKm)
+    && Number(distancePolicy.flightMinKm) > Number(distancePolicy.localTransitMaxKm);
+  const canSubmit = completedRequired === requiredChecks.length && distancePolicyValid && !loading;
 
   const handleSubmit = (e) => {
     e.preventDefault();

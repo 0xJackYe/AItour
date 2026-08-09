@@ -1,6 +1,24 @@
 const VALID_MODES = new Set([
   'WALK', 'TRANSIT', 'DRIVE', 'BICYCLE', 'RAIL', 'FLIGHT', 'TAXI', 'FERRY',
+  'BUS', 'SUBWAY', 'TRAIN', 'LIGHT_RAIL', 'HIGH_SPEED_RAIL', 'COACH',
 ]);
+const MODE_ALIASES = Object.freeze({
+  HIGH_SPEED_TRAIN: 'HIGH_SPEED_RAIL',
+  LONG_DISTANCE_TRAIN: 'TRAIN',
+  HEAVY_RAIL: 'TRAIN',
+  COMMUTER_TRAIN: 'TRAIN',
+  INTERCITY_BUS: 'COACH',
+  TRAM: 'LIGHT_RAIL',
+  METRO_RAIL: 'SUBWAY',
+  OTHER: 'TRANSIT',
+});
+
+export const TRANSIT_MODE_OPTIONS = Object.freeze(['BUS', 'SUBWAY', 'TRAIN', 'LIGHT_RAIL', 'RAIL']);
+export const DEFAULT_DISTANCE_POLICY = Object.freeze({
+  walkMaxKm: 1,
+  localTransitMaxKm: 30,
+  flightMinKm: 800,
+});
 
 export const EMPTY_PROFILE = Object.freeze({
   days: '',
@@ -11,6 +29,11 @@ export const EMPTY_PROFILE = Object.freeze({
     priority: '',
     allowedModes: ['WALK', 'TRANSIT', 'RAIL'],
     avoidModes: [],
+    transitPreferences: {
+      allowedModes: [...TRANSIT_MODE_OPTIONS],
+      routingPreference: '',
+    },
+    distancePolicy: { ...DEFAULT_DISTANCE_POLICY },
   },
   travelers: { adults: 1, children: 0, seniors: 0 },
   maxWalkingKm: 6,
@@ -37,11 +60,38 @@ export function stableId(prefix, ...parts) {
 }
 
 export function cloneProfile(profile = {}) {
+  const transport = profile.transport && typeof profile.transport === 'object' ? profile.transport : {};
+  const transitPreferences = transport.transitPreferences && typeof transport.transitPreferences === 'object'
+    ? transport.transitPreferences
+    : {};
+  const distancePolicy = transport.distancePolicy && typeof transport.distancePolicy === 'object'
+    ? transport.distancePolicy
+    : {};
   return {
     ...EMPTY_PROFILE,
     ...profile,
     budget: { ...EMPTY_PROFILE.budget, ...(profile.budget || {}) },
-    transport: { ...EMPTY_PROFILE.transport, ...(profile.transport || {}) },
+    transport: {
+      ...EMPTY_PROFILE.transport,
+      ...transport,
+      allowedModes: Array.isArray(transport.allowedModes)
+        ? [...transport.allowedModes]
+        : [...EMPTY_PROFILE.transport.allowedModes],
+      avoidModes: Array.isArray(transport.avoidModes)
+        ? [...transport.avoidModes]
+        : [...EMPTY_PROFILE.transport.avoidModes],
+      transitPreferences: {
+        ...EMPTY_PROFILE.transport.transitPreferences,
+        ...transitPreferences,
+        allowedModes: Array.isArray(transitPreferences.allowedModes)
+          ? [...transitPreferences.allowedModes]
+          : [...EMPTY_PROFILE.transport.transitPreferences.allowedModes],
+      },
+      distancePolicy: {
+        ...EMPTY_PROFILE.transport.distancePolicy,
+        ...distancePolicy,
+      },
+    },
     travelers: { ...EMPTY_PROFILE.travelers, ...(profile.travelers || {}) },
     accommodation: { ...EMPTY_PROFILE.accommodation, ...(profile.accommodation || {}) },
     interests: Array.isArray(profile.interests) ? [...profile.interests] : [],
@@ -64,25 +114,109 @@ export function profileCompletion(profile = {}) {
   };
 }
 
+function finiteCoordinateValue(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string' && value.trim() === '') return false;
+  return Number.isFinite(Number(value));
+}
+
+export function validGeometryPoint(point) {
+  return Array.isArray(point)
+    && point.length >= 2
+    && finiteCoordinateValue(point[0])
+    && finiteCoordinateValue(point[1])
+    && Math.abs(Number(point[0])) <= 90
+    && Math.abs(Number(point[1])) <= 180;
+}
+
 export function validCoordinates(coordinates) {
   return Boolean(
     coordinates
-      && Number.isFinite(Number(coordinates.lat))
-      && Number.isFinite(Number(coordinates.lng))
+      && finiteCoordinateValue(coordinates.lat)
+      && finiteCoordinateValue(coordinates.lng)
       && Math.abs(Number(coordinates.lat)) <= 90
       && Math.abs(Number(coordinates.lng)) <= 180,
   );
 }
 
+export function isActualIntercityTransition(stage, nextStage, connection) {
+  if (String(connection?.type || '').toLowerCase() !== 'intercity') return false;
+  const normalizePlace = value => String(value || '').trim().toLocaleLowerCase();
+  const leftCity = normalizePlace(stage?.city);
+  const rightCity = normalizePlace(nextStage?.city);
+  const leftCountry = normalizePlace(stage?.country);
+  const rightCountry = normalizePlace(nextStage?.country);
+  const cityChanged = Boolean(leftCity && rightCity && leftCity !== rightCity);
+  const countryChanged = Boolean(leftCountry && rightCountry && leftCountry !== rightCountry);
+  return cityChanged || countryChanged;
+}
+
+function safeHttpUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    const allowedOrigin = ['https://www.google.com', 'https://maps.google.com'].includes(url.origin.toLowerCase());
+    const allowedPath = url.pathname === '/maps/dir/';
+    const hasNoCredentials = !url.username && !url.password;
+    return allowedOrigin && allowedPath && hasNoCredentials ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function externalDirectionsReference(leg) {
+  if (String(leg?.status || leg?.route_status || '').toLowerCase() !== 'needs_confirmation') return null;
+  if (!leg?.external_directions_url && !leg?.advisory_text && !leg?.provider_limit_code) return null;
+  return {
+    advisory: String(leg.advisory_text || leg.reason || '请在 Google Maps 核对实时公共交通方案。'),
+    url: safeHttpUrl(leg.external_directions_url),
+    providerLimitCode: leg.provider_limit_code || null,
+  };
+}
+
+export function routeAdvisoryText(leg) {
+  const value = leg?.advisory_text ?? leg?.connection_to_next_notes ?? null;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+export function googleRouteCompliance(plan, routes = []) {
+  const plannedRoutes = (plan?.daily_plans || []).flatMap(day => [
+    ...(day.legs || []),
+    ...(day.connection_to_next ? [day.connection_to_next] : []),
+  ]);
+  const googleRoutes = [...routes, ...plannedRoutes].filter(route => (
+    String(route?.provider || '').toLowerCase() === 'google'
+      || String(route?.attribution || '').toLowerCase().includes('google')
+  ));
+  const betaModes = new Set();
+  googleRoutes.forEach(route => {
+    const segments = Array.isArray(route.segments) && route.segments.length ? route.segments : [route];
+    segments.forEach(segment => {
+      const mode = String(segment.travel_mode || segment.mode || '').toUpperCase();
+      if (['WALK', 'BICYCLE'].includes(mode)) betaModes.add(mode);
+    });
+  });
+  return {
+    usesGoogle: googleRoutes.length > 0,
+    betaModes: [...betaModes],
+  };
+}
+
+function optionalNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 export function formatDistance(meters) {
-  const numeric = Number(meters);
+  const numeric = optionalNumber(meters);
   if (!Number.isFinite(numeric) || numeric < 0) return null;
   if (numeric >= 1000) return `${(numeric / 1000).toFixed(numeric >= 10000 ? 0 : 1)} km`;
   return `${Math.round(numeric)} m`;
 }
 
 export function formatDuration(seconds) {
-  const numeric = Number(seconds);
+  const numeric = optionalNumber(seconds);
   if (!Number.isFinite(numeric) || numeric < 0) return null;
   const totalMinutes = Math.round(numeric / 60);
   const hours = Math.floor(totalMinutes / 60);
@@ -129,11 +263,18 @@ export function modeLabel(mode) {
     FLIGHT: '飞机',
     TAXI: '出租车',
     FERRY: '轮渡',
+    BUS: '公交车',
+    COACH: '长途巴士',
+    SUBWAY: '地铁',
+    TRAIN: '火车',
+    LIGHT_RAIL: '轻轨',
+    HIGH_SPEED_RAIL: '高速铁路',
   })[String(mode || '').toUpperCase()] || '交通待确认';
 }
 
 function normalizeMode(mode) {
-  const normalized = String(mode || '').toUpperCase();
+  const raw = String(mode || '').toUpperCase();
+  const normalized = MODE_ALIASES[raw] || raw;
   return VALID_MODES.has(normalized) ? normalized : 'UNKNOWN';
 }
 
@@ -157,26 +298,71 @@ function normalizeNode(node, dayNumber, index) {
   };
 }
 
-function normalizeLeg(leg, dayNumber, index, fallbackFrom, fallbackTo) {
-  const geometry = Array.isArray(leg.geometry)
-    ? leg.geometry.filter(point => Array.isArray(point)
-      && Number.isFinite(Number(point[0]))
-      && Number.isFinite(Number(point[1])))
-      .map(([lat, lng]) => [Number(lat), Number(lng)])
+function normalizeGeometry(value) {
+  if (!Array.isArray(value)) return null;
+  const geometry = value.filter(validGeometryPoint)
+    .map(([lat, lng]) => [Number(lat), Number(lng)]);
+  return geometry.length >= 2 ? geometry : null;
+}
+
+function normalizeStop(stop) {
+  if (!stop || typeof stop !== 'object') return null;
+  const rawCoordinates = stop.coordinates || stop.location;
+  const coordinates = validCoordinates(rawCoordinates)
+    ? { ...rawCoordinates, lat: Number(rawCoordinates.lat), lng: Number(rawCoordinates.lng) }
     : null;
+  return {
+    ...stop,
+    name: stop.name || stop.stop_name || stop.label || '',
+    coordinates,
+  };
+}
+
+function normalizeSegment(segment, legId, index, routeVerified) {
+  const rawMode = segment.transit_vehicle_type || segment.mode || segment.travel_mode || 'UNKNOWN';
+  const mode = normalizeMode(rawMode);
+  const geometry = routeVerified ? normalizeGeometry(segment.geometry) : null;
+  return {
+    ...segment,
+    id: segment.id || stableId('segment', legId, index, rawMode),
+    sequence: optionalNumber(segment.sequence) ?? index,
+    travel_mode: String(segment.travel_mode || (mode === 'WALK' ? 'WALK' : 'TRANSIT')).toUpperCase(),
+    mode,
+    transit_vehicle_type: String(segment.transit_vehicle_type || (mode === 'TRANSIT' ? '' : mode)).toUpperCase() || null,
+    line: segment.line && typeof segment.line === 'object' ? { ...segment.line } : null,
+    from_stop: normalizeStop(segment.from_stop || segment.fromStop),
+    to_stop: normalizeStop(segment.to_stop || segment.toStop),
+    distance_meters: optionalNumber(segment.distance_meters),
+    duration_seconds: optionalNumber(segment.duration_seconds),
+    geometry,
+  };
+}
+
+function normalizeLeg(leg, dayNumber, index, fallbackFrom, fallbackTo) {
   const explicitStatus = leg.status || leg.route_status;
   const isVerifiedRoute = ['success', 'planned', 'available'].includes(explicitStatus);
-  const status = explicitStatus || (leg.provider && geometry?.length >= 2 ? 'success' : 'unknown');
+  const rawGeometry = normalizeGeometry(leg.geometry);
+  const status = explicitStatus || (leg.provider && rawGeometry ? 'success' : 'unknown');
+  const verified = isVerifiedRoute || status === 'success';
+  const id = leg.id || leg.leg_id || stableId('leg', dayNumber, fallbackFrom, fallbackTo, index);
+  const segments = (Array.isArray(leg.segments) ? leg.segments : [])
+    .map((segment, segmentIndex) => normalizeSegment(segment, id, segmentIndex, verified))
+    .sort((left, right) => left.sequence - right.sequence);
   return {
     ...leg,
-    id: leg.id || leg.leg_id || stableId('leg', dayNumber, fallbackFrom, fallbackTo, index),
+    id,
     from_node_id: leg.from_node_id || leg.fromNodeId || fallbackFrom || null,
     to_node_id: leg.to_node_id || leg.toNodeId || fallbackTo || null,
     mode: normalizeMode(leg.mode || leg.selected_mode || leg.travel_mode),
     status,
-    distance_meters: Number.isFinite(Number(leg.distance_meters)) ? Number(leg.distance_meters) : null,
-    duration_seconds: Number.isFinite(Number(leg.duration_seconds)) ? Number(leg.duration_seconds) : null,
-    geometry: isVerifiedRoute || status === 'success' ? geometry : null,
+    distance_meters: optionalNumber(leg.distance_meters),
+    duration_seconds: optionalNumber(leg.duration_seconds),
+    geometry: verified ? rawGeometry : null,
+    segments,
+    summary: leg.summary || '',
+    advisory_text: routeAdvisoryText(leg) || null,
+    primary_vehicle: String(leg.primary_vehicle || leg.primaryVehicle || '').toUpperCase() || null,
+    transfers: optionalNumber(leg.transfers),
     departure_time: leg.departure_time || leg.departure_at || null,
     arrival_time: leg.arrival_time || leg.arrival_at || null,
     reason: leg.reason || leg.selection_reason || '',
@@ -208,6 +394,13 @@ function normalizeDay(day, index, routes = []) {
         nodes[legIndex + 1]?.id,
       ))
     : makeLegacyLegs(nodes, dayNumber);
+  const rawConnection = day.connection_to_next || day.connectionToNext;
+  const connection = rawConnection
+    ? normalizeLeg({
+        ...rawConnection,
+        advisory_text: routeAdvisoryText(rawConnection) || String(day.connection_to_next_notes || '').trim() || null,
+      }, dayNumber, legs.length, rawConnection.from_node_id, rawConnection.to_node_id)
+    : null;
 
   return {
     ...day,
@@ -218,6 +411,7 @@ function normalizeDay(day, index, routes = []) {
     nodes,
     spots: nodes.filter(node => !['hotel', 'stay'].includes(node.type)),
     legs,
+    connection_to_next: connection,
   };
 }
 

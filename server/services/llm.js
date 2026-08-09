@@ -54,7 +54,8 @@ const PLAN_SCHEMA = `{
             "tips": "实用建议"
           }
         ],
-        "transport_notes": "当天交通建议，说明逐段建议交通方式"
+        "transport_notes": "当天市内交通建议，说明逐段建议交通方式",
+        "connection_to_next_notes": "仅当本日结束后换到下一城市时填写；明确起止城市、车站/机场、线路或车辆、换乘点和行李衔接；非换城日必须为 null"
       }
     ],
     "route_reasoning": "路线逻辑",
@@ -77,7 +78,7 @@ ${PLAN_SCHEMA}
 7. 同名地点必须选当天 city/country 内的候选，并在 name_en 中附带城市或行政区用于消歧。
 8. 信息严重不足才返回 need_clarification。
 9. 结构化用户偏好是硬约束：严格遵守预算、同行人、允许/避免交通方式、步行上限、每日作息、饮食和无障碍需求。
-10. 每天必须围绕当日住宿形成可返回的连续路线；换城日必须在 transport_notes 中写清退房、车站/机场、行李和入住衔接。
+10. 每天必须围绕当日住宿形成可返回的连续路线。transport_notes 只描述当天市内移动；若本日结束后换到下一城市，必须另在 connection_to_next_notes 中逐段写清 from/to 城市、退房、出发与到达车站/机场、具体线路或车辆（如新干线列车名、地铁线、巴士）、换乘点、行李和入住衔接，禁止只写“公共交通”“火车”等泛化方式，无法确认班次时注明临近出发复核；非换城日 connection_to_next_notes 必须为 null。
 11. 预算金额不能伪造精确价格。只有在有合理估算时才填写 cost；currency 必须与结构化预算币种一致，basis 固定为 group_total，金额必须是本次活动全部同行人的合计；不确定时 cost 填 null。住宿总价也可作为 hotel 节点 cost 输出，但不能重复计算。
 12. 描述和 tips 要简短，优先保证完整 JSON 和完整天数。`;
 
@@ -86,7 +87,7 @@ const LONG_OUTLINE_PROMPT = `你是长途旅行路线架构师。请先输出一
 JSON 顶层和 plan 元数据必须遵循下面结构：
 ${PLAN_SCHEMA}
 
-这是长行程骨架阶段，daily_plans 中每个 spot 只输出 name、name_en、type；不要输出 description、tips、duration_hours、cost，以节省长度。transport_notes 只写一句。
+这是长行程骨架阶段，daily_plans 中每个 spot 只输出 name、name_en、type；不要输出 description、tips、duration_hours、cost，以节省长度。transport_notes 只写一句；connection_to_next_notes 仅换城日填写具体跨城衔接，非换城日为 null。
 
 硬性要求：
 - daily_plans 必须逐日连续覆盖用户要求的全部天数。
@@ -95,7 +96,7 @@ ${PLAN_SCHEMA}
 - name_en 必须带城市或行政区消歧；不要选择同名的其他城市地点。
 - relaxed 节奏每天安排 2-3 个主要地点。
 - 必须遵守结构化偏好中的预算、同行人、交通、步行上限、日作息、无障碍和饮食约束。
-- 每座城市必须有可编码住宿地标，换城日要显式规划退房、跨城交通、行李和入住。
+- 每座城市必须有可编码住宿地标；换城日必须用 connection_to_next_notes 逐段写出 from/to 城市、具体出发/到达车站或机场、线路/车辆和换乘点，禁止只写“公共交通”“火车”，不确定的班次注明临近出发复核，并规划退房、行李和入住；不得拿市内 transport_notes 代替。
 - 只输出 JSON，不要 Markdown。`;
 
 const DETAIL_PROMPT = `你是旅行计划细化助手。输入会包含用户原需求和一个已经确定的行程片段骨架。
@@ -105,7 +106,7 @@ const DETAIL_PROMPT = `你是旅行计划细化助手。输入会包含用户原
 - 不得改变 day、city、country、景点 name、name_en、type，也不得增删景点。
 - 为每个景点补充 duration_hours、简短 description、简短 tips。
 - 有合理费用估算时补充 cost：{amount, currency, basis:"group_total", category, confidence:"estimate"}。currency 必须与用户预算币种一致，amount 是该活动全部同行人的合计；不确定时 cost 为 null。
-- 补充当天 transport_notes，并遵守用户指定的交通方式和旅行节奏。
+- 补充当天市内 transport_notes，并遵守用户指定的交通方式和旅行节奏；仅换城日补充 connection_to_next_notes，逐段写出 from/to 城市、具体出发/到达车站或机场、线路/车辆及换乘点，禁止只写“公共交通”“火车”，不确定班次注明临近出发复核；非换城日该字段为 null。
 - 只输出 JSON，不要 Markdown。`;
 
 export class LLMOutputError extends Error {
@@ -233,13 +234,69 @@ function destinationForDay(destinations, dayNumber) {
   );
 }
 
+function sameDayLocation(left, right) {
+  if (!left || !right) return true;
+  return String(left.city || '').trim().toLowerCase() === String(right.city || '').trim().toLowerCase()
+    && String(left.country || '').trim().toLowerCase() === String(right.country || '').trim().toLowerCase();
+}
+
+function hasMultipleCitiesWithinDay(day) {
+  const cities = new Set([day?.city, ...(day?.spots || []).map(spot => spot?.city)]
+    .map(value => String(value || '').trim().toLowerCase())
+    .filter(Boolean));
+  return cities.size > 1;
+}
+
+function dayCityAliases(day) {
+  return [...new Set([day?.city, ...(day?.spots || []).map(spot => spot?.city)]
+    .map(value => String(value || '').normalize('NFKC').toLowerCase().replace(/\s+/g, ''))
+    .filter(Boolean))];
+}
+
+function noteReferencesDay(note, day) {
+  const text = String(note || '').normalize('NFKC').toLowerCase().replace(/\s+/g, '');
+  return dayCityAliases(day).some(alias => text.includes(alias));
+}
+
+function noteNamesBothEndpoints(note, fromDay, toDay) {
+  return noteReferencesDay(note, fromDay) && noteReferencesDay(note, toDay);
+}
+
+function relocateArrivalDayConnectionNotes(dailyPlans) {
+  for (let index = 0; index < dailyPlans.length - 1; index++) {
+    const fromDay = dailyPlans[index];
+    const arrivalDay = dailyPlans[index + 1];
+    if (sameDayLocation(fromDay, arrivalDay)) continue;
+    if (String(fromDay.connection_to_next_notes || '').trim()) continue;
+    const misplaced = String(arrivalDay.connection_to_next_notes || '').trim();
+    if (!misplaced) continue;
+    // If the departure day already visits the next day's declared city, the note
+    // can represent a genuine same-day multi-city movement and must not be moved.
+    const arrivalCity = String(arrivalDay.city || '').trim().toLowerCase();
+    const departureAlreadyVisitsArrival = (fromDay.spots || []).some(spot =>
+      String(spot?.city || '').trim().toLowerCase() === arrivalCity,
+    );
+    if (departureAlreadyVisitsArrival) continue;
+    // Region aliases such as 富士山/河口湖 can make an arrival day look
+    // multi-city. Permit relocation only when the note explicitly references
+    // the departure side; ordinary local notes still stay untouched.
+    if (hasMultipleCitiesWithinDay(arrivalDay) && !noteReferencesDay(misplaced, fromDay)) continue;
+    const followingDay = dailyPlans[index + 2] || null;
+    const arrivalDoesNotDepartAgain = !followingDay || sameDayLocation(arrivalDay, followingDay);
+    if (!arrivalDoesNotDepartAgain && !noteNamesBothEndpoints(misplaced, fromDay, arrivalDay)) continue;
+    dailyPlans[index] = { ...fromDay, connection_to_next_notes: misplaced };
+    dailyPlans[index + 1] = { ...arrivalDay, connection_to_next_notes: null };
+  }
+  return dailyPlans;
+}
+
 export function normalizePlan(plan, requestedDays = null) {
   if (!plan || typeof plan !== 'object') return plan;
   const destinations = Array.isArray(plan.destinations) ? plan.destinations : [];
   const fallbackCity = plan.city && plan.city !== '多城市' ? plan.city : '';
   const fallbackCountry = plan.country && !String(plan.country).includes('、') ? plan.country : '';
   const singleDestinationScope = Boolean(fallbackCity && destinations.length <= 1);
-  const dailyPlans = (Array.isArray(plan.daily_plans) ? plan.daily_plans : [])
+  const dailyPlans = relocateArrivalDayConnectionNotes((Array.isArray(plan.daily_plans) ? plan.daily_plans : [])
     .map((day, index) => {
       const dayNumber = Number(day.day) || index + 1;
       const destination = destinationForDay(destinations, dayNumber);
@@ -261,7 +318,7 @@ export function normalizePlan(plan, requestedDays = null) {
         })),
       };
     })
-    .sort((a, b) => a.day - b.day);
+    .sort((a, b) => a.day - b.day));
 
   const accommodations = Array.isArray(plan.accommodations) && plan.accommodations.length
     ? plan.accommodations
@@ -317,6 +374,9 @@ function mergeDetailedDay(outlineDay, detailedDay) {
     ...outlineDay,
     theme: detailedDay.theme || outlineDay.theme,
     transport_notes: detailedDay.transport_notes || outlineDay.transport_notes || '',
+    connection_to_next_notes: detailedDay.connection_to_next_notes
+      ?? outlineDay.connection_to_next_notes
+      ?? null,
     spots,
   };
 }
@@ -386,6 +446,7 @@ async function generateLongPlan(userMessage, feedback = null, profile = null) {
   outlineResult.plan.daily_plans = outlineResult.plan.daily_plans.map(day =>
     mergeDetailedDay(day, detailByDay.get(Number(day.day))),
   );
+  outlineResult.plan = normalizePlan(outlineResult.plan, expectedDays);
   assertCompleteDays(outlineResult.plan, expectedDays);
   return outlineResult;
 }

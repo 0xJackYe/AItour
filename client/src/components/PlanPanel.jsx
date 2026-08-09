@@ -1,4 +1,11 @@
 import PlanHealthDrawer from './PlanHealthDrawer.jsx';
+import {
+  externalDirectionsReference,
+  googleRouteCompliance,
+  isActualIntercityTransition,
+  routeAdvisoryText,
+} from '../services/planModel.js';
+import { formatSegmentTime, formatTimeValue } from '../services/timeFormat.js';
 
 const TYPE_EMOJI = {
   attraction: '🏛️', restaurant: '🍜', transport: '🚇', hotel: '🏨',
@@ -8,6 +15,8 @@ const TYPE_EMOJI = {
 const MODE_LABELS = {
   WALK: '步行', TRANSIT: '公共交通', DRIVE: '驾车 / 打车', BICYCLE: '骑行',
   RAIL: '铁路', FLIGHT: '飞机', TAXI: '出租车', FERRY: '轮渡', UNKNOWN: '交通待确认',
+  BUS: '公交车', COACH: '长途巴士', SUBWAY: '地铁', TRAIN: '火车',
+  LIGHT_RAIL: '轻轨', HIGH_SPEED_RAIL: '新干线 / 高铁',
 };
 
 function stablePart(value) {
@@ -15,12 +24,14 @@ function stablePart(value) {
 }
 
 function formatDistance(meters) {
+  if (meters === null || meters === undefined || meters === '') return null;
   const value = Number(meters);
   if (!Number.isFinite(value) || value < 0) return null;
   return value >= 1000 ? `${(value / 1000).toFixed(1)} km` : `${Math.round(value)} m`;
 }
 
 function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined || seconds === '') return null;
   const value = Number(seconds);
   if (!Number.isFinite(value) || value < 0) return null;
   const totalMinutes = Math.round(value / 60);
@@ -30,9 +41,117 @@ function formatDuration(seconds) {
 }
 
 function formatClock(value) {
-  if (!value) return '';
-  const match = String(value).match(/(?:T|^)(\d{2}:\d{2})/);
-  return match?.[1] || String(value);
+  return formatTimeValue(value);
+}
+
+function segmentMode(segment = {}) {
+  const value = String(segment.transit_vehicle_type || segment.mode || segment.travel_mode || 'UNKNOWN').toUpperCase();
+  return ({
+    HIGH_SPEED_TRAIN: 'HIGH_SPEED_RAIL',
+    LONG_DISTANCE_TRAIN: 'TRAIN',
+    HEAVY_RAIL: 'TRAIN',
+    COMMUTER_TRAIN: 'TRAIN',
+    INTERCITY_BUS: 'COACH',
+    TRAM: 'LIGHT_RAIL',
+    METRO_RAIL: 'SUBWAY',
+    OTHER: 'TRANSIT',
+  })[value] || value;
+}
+
+function segmentLineName(segment = {}) {
+  return segment.line?.name || segment.line?.name_short || MODE_LABELS[segmentMode(segment)] || '交通待确认';
+}
+
+function readableSegments(leg = {}) {
+  if (Array.isArray(leg.segments) && leg.segments.length) {
+    return [...leg.segments].sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0));
+  }
+  return [{
+    ...leg,
+    id: `${leg.id || leg.leg_id || 'leg'}-aggregate`,
+    transit_vehicle_type: leg.primary_vehicle || leg.mode || leg.travel_mode,
+  }];
+}
+
+function connectionSummary(leg) {
+  if (!leg) return '跨城交通待确认';
+  if (leg.summary) return leg.summary;
+  const names = readableSegments(leg).map(segmentLineName).filter(Boolean);
+  return [...new Set(names)].join(' → ') || MODE_LABELS[String(leg.mode || leg.travel_mode || 'UNKNOWN').toUpperCase()];
+}
+
+function stopName(stop) {
+  return stop?.name || stop?.stop_name || '';
+}
+
+function TransportChain({ leg, compact = false }) {
+  if (!leg) return <span className="transport-unconfirmed">具体线路待确认</span>;
+  const externalReference = externalDirectionsReference(leg);
+  if (externalReference) {
+    return (
+      <div className={`transport-reference ${compact ? 'compact' : ''}`} role="note">
+        <strong>参考交通建议</strong>
+        <p>{externalReference.advisory}</p>
+        <small>该段未在站内绘制轨迹，请以 Google Maps 的实时公共交通结果为准。</small>
+        <small className="google-inline-attribution">Powered by Google, ©{new Date().getFullYear()} Google</small>
+        {externalReference.url && (
+          <a href={externalReference.url} target="_blank" rel="noopener noreferrer">
+            在 Google Maps 查看实时公共交通
+          </a>
+        )}
+      </div>
+    );
+  }
+  const segments = readableSegments(leg);
+  const advisory = routeAdvisoryText(leg);
+  return (
+    <div className={`transport-chain ${compact ? 'compact' : ''}`}>
+      {segments.map((segment, index) => {
+        const from = stopName(segment.from_stop || segment.fromStop);
+        const to = stopName(segment.to_stop || segment.toStop);
+        const timing = [
+          formatSegmentTime(segment, 'departure_time'),
+          formatSegmentTime(segment, 'arrival_time'),
+        ].filter(Boolean).join('–');
+        return (
+          <div className="transport-chain-step" key={segment.id || `${leg.id || 'leg'}-${index}`}>
+            <span className={`vehicle-badge vehicle-${segmentMode(segment).toLowerCase()}`}>
+              {MODE_LABELS[segmentMode(segment)] || segmentMode(segment)}
+            </span>
+            <div>
+              <strong>{segmentLineName(segment)}</strong>
+              {(from || to) && <span>{from || '起点'} → {to || '终点'}</span>}
+              <small>{[
+                segment.headsign && `开往 ${segment.headsign}`,
+                timing,
+                formatDuration(segment.duration_seconds),
+                segment.stop_count != null ? `${segment.stop_count} 站` : null,
+              ].filter(Boolean).join(' · ')}</small>
+            </div>
+          </div>
+        );
+      })}
+      {Number(leg.transfers) > 0 && <span className="transfer-count">换乘 {leg.transfers} 次</span>}
+      {advisory && (
+        <p className="transport-advisory"><strong>衔接建议：</strong>{advisory}</p>
+      )}
+    </div>
+  );
+}
+
+function RouteComplianceNotice({ compliance }) {
+  if (!compliance.usesGoogle) return null;
+  const betaLabels = compliance.betaModes.map(mode => MODE_LABELS[mode] || mode);
+  return (
+    <aside className="route-compliance-notice" aria-label="Google 路线数据说明">
+      <span>Powered by Google, ©{new Date().getFullYear()} Google</span>
+      {betaLabels.length > 0 && (
+        <small>
+          {betaLabels.join('、')} Beta 路线在部分地区可能缺少清晰的人行道或骑行路径信息。
+        </small>
+      )}
+    </aside>
+  );
 }
 
 function formatBudget(budget) {
@@ -181,7 +300,7 @@ function JourneyRail({ plan, stages }) {
               {next && (
                 <div className={`journey-transfer ${connection ? '' : 'unconfirmed'}`}>
                   <span aria-hidden="true">→</span>
-                  <small>{connection ? `${MODE_LABELS[String(connection.mode || connection.travel_mode || 'RAIL').toUpperCase()] || '跨城交通'}${formatDuration(connection.durationSeconds ?? connection.duration_seconds) ? ` · ${formatDuration(connection.durationSeconds ?? connection.duration_seconds)}` : ''}` : '跨城交通待确认'}</small>
+                  <small title={connectionSummary(connection)}>{connection ? `${connectionSummary(connection)}${formatDuration(connection.durationSeconds ?? connection.duration_seconds) ? ` · ${formatDuration(connection.durationSeconds ?? connection.duration_seconds)}` : ''}` : '跨城交通待确认'}</small>
                 </div>
               )}
             </div>
@@ -254,19 +373,24 @@ function LegRow({ leg, day, selected, onSelect }) {
     ? '具体班次待确认'
     : unavailable ? (leg.reason || '路线与耗时待确认') : fallbackNote;
   const description = [details, statusNote].filter(Boolean).join(' · ') || '路线与耗时待确认';
+  const primaryMode = String(leg.primary_vehicle || leg.mode || 'UNKNOWN').toUpperCase();
+  const summary = connectionSummary(leg);
   return (
-    <button
-      type="button"
-      className={`timeline-leg ${selected ? 'selected' : ''} ${unavailable || needsConfirmation ? 'unavailable' : ''}`}
-      onClick={() => onSelect?.(leg.id, Number(day.day ?? day.dayNumber))}
-      aria-pressed={selected}
-      aria-label={`${MODE_LABELS[leg.mode] || leg.mode}，${description}`}
-    >
-      <span className="leg-line" aria-hidden="true" />
-      <span className="leg-mode">{MODE_LABELS[leg.mode] || leg.mode}</span>
-      <span>{description}</span>
-      {leg.transfers != null && <span>换乘 {leg.transfers} 次</span>}
-    </button>
+    <div className={`timeline-leg-group ${selected ? 'selected' : ''}`}>
+      <button
+        type="button"
+        className={`timeline-leg ${selected ? 'selected' : ''} ${unavailable || needsConfirmation ? 'unavailable' : ''}`}
+        onClick={() => onSelect?.(leg.id, Number(day.day ?? day.dayNumber))}
+        aria-pressed={selected}
+        aria-label={`${summary}，${description}`}
+      >
+        <span className="leg-line" aria-hidden="true" />
+        <span className="leg-mode">{MODE_LABELS[primaryMode] || MODE_LABELS[leg.mode] || leg.mode}</span>
+        <strong className="leg-summary">{summary}</strong>
+        <span>{description}</span>
+      </button>
+      {Array.isArray(leg.segments) && leg.segments.length > 0 && <TransportChain leg={leg} compact />}
+    </div>
   );
 }
 
@@ -364,17 +488,82 @@ function DayBoundaryCard({ day, nextDay, plan, stages }) {
   const connection = day.connection_to_next || day.connectionToNext
     || (stageChanged ? findIntercityLeg(plan, currentStage || {}, nextStage, stages.indexOf(currentStage)) : null);
   const accommodation = currentStage?.accommodation || currentStage?.stay;
+  const externalReference = externalDirectionsReference(connection);
   return (
     <aside className={`day-boundary-card ${stageChanged ? 'intercity' : ''}`}>
       <span className="boundary-line" aria-hidden="true" />
       <div className="boundary-copy">
         <strong>{stageChanged ? `${currentStage?.city || ''} → ${nextStage?.city || ''}` : '当晚住宿与次日衔接'}</strong>
         <span>{stageChanged
-          ? connection ? `${MODE_LABELS[String(connection.mode || connection.travel_mode || 'RAIL').toUpperCase()] || '跨城交通'}${formatDuration(connection.durationSeconds ?? connection.duration_seconds) ? ` · ${formatDuration(connection.durationSeconds ?? connection.duration_seconds)}` : ''}` : '跨城方式与时间待确认'
+          ? connection ? `${externalReference ? `参考交通建议：${externalReference.advisory}` : connectionSummary(connection)}${formatDuration(connection.durationSeconds ?? connection.duration_seconds) ? ` · ${formatDuration(connection.durationSeconds ?? connection.duration_seconds)}` : ''}` : '跨城方式与时间待确认'
           : accommodation?.area ? `返回 ${accommodation.area} 住宿，次日从住宿地出发` : '住宿地点待确认；次日起点将在确认后计算'}</span>
+        {stageChanged && connection && <TransportChain leg={connection} compact />}
       </div>
       <span className="next-day-label">Day {nextDay.day ?? nextDay.dayNumber}</span>
     </aside>
+  );
+}
+
+function overviewConnection(plan, routes, stages, index) {
+  const stage = stages[index];
+  const nextStage = stages[index + 1];
+  const fromDay = Number(stage?.endDay ?? stage?.end_day);
+  const toDay = Number(nextStage?.startDay ?? nextStage?.start_day);
+  const embedded = findIntercityLeg(plan, stage || {}, nextStage, index);
+  const routed = (routes || []).find(route => route.connection_to_day != null
+    && Number(route.day) === fromDay
+    && Number(route.connection_to_day) === toDay);
+  if (!embedded) return routed || null;
+  if (!routed) return embedded;
+  return {
+    ...embedded,
+    ...routed,
+    segments: routed.segments?.length ? routed.segments : embedded.segments,
+    advisory_text: routeAdvisoryText(routed) || routeAdvisoryText(embedded) || null,
+  };
+}
+
+function TripOverview({ plan, stages, routes, onSelectLeg }) {
+  const connections = stages.slice(0, -1).map((stage, index) => {
+    const nextStage = stages[index + 1];
+    const connection = overviewConnection(plan, routes, stages, index);
+    return { stage, nextStage, connection };
+  }).filter(({ stage, nextStage, connection }) => (
+    isActualIntercityTransition(stage, nextStage, connection)
+  ));
+  return (
+    <section className="trip-overview-card" aria-labelledby="trip-overview-title">
+      <div className="section-heading">
+        <div>
+          <strong id="trip-overview-title">全程跨城交通</strong>
+          <p>地图显示全部已定位景点；有真实轨迹的跨城分段会按交通方式着色，需实时确认的线路不会绘制假轨迹。</p>
+        </div>
+        <span>{connections.length} 段跨城行程</span>
+      </div>
+      {connections.length ? (
+        <div className="overview-connections">
+          {connections.map(({ stage, nextStage, connection }, index) => (
+            <article className="overview-connection" key={`${stage.id}-${nextStage.id}`}>
+              <header>
+                <div>
+                  <span>跨城 {index + 1}</span>
+                  <strong>{stage.city || '上一城市'} → {nextStage.city || '下一城市'}</strong>
+                </div>
+                {connection?.id && !externalDirectionsReference(connection) && (
+                  <button type="button" onClick={() => onSelectLeg?.(connection.id, null)}>在地图查看</button>
+                )}
+              </header>
+              <p className="overview-route-summary">
+                {externalDirectionsReference(connection)
+                  ? `参考交通建议：${externalDirectionsReference(connection).advisory}`
+                  : connectionSummary(connection)}
+              </p>
+              <TransportChain leg={connection} />
+            </article>
+          ))}
+        </div>
+      ) : <p className="empty-day">当前行程只包含一个城市阶段。</p>}
+    </section>
   );
 }
 
@@ -408,7 +597,9 @@ export default function PlanPanel({
   const nextDay = days[selectedIndex + 1];
   const budget = profile?.budget || plan.profile?.budget || plan.preferences?.budget_details || (typeof plan.preferences?.budget === 'object' ? plan.preferences.budget : null);
   const budgetLabel = formatBudgetSummary(plan.budget_summary, budget);
-  const planBlocked = health?.passed === false || String(health?.status || '').toLowerCase() === 'failed';
+  const healthStatus = String(health?.status || '').toLowerCase();
+  const planBlocked = health?.passed === false || ['failed', 'blocked', 'blocking'].includes(healthStatus);
+  const routeCompliance = googleRouteCompliance(plan, routes);
 
   return (
     <div className="plan-panel">
@@ -431,14 +622,12 @@ export default function PlanPanel({
         geocodingWarnings={geocodingWarnings}
         transitMarkers={transitMarkers}
       />
+      <RouteComplianceNotice compliance={routeCompliance} />
       <JourneyRail plan={plan} stages={stages} />
       <DayNavigator stages={stages} days={days} selectedDay={effectiveSelectedDay} onSelectDay={onSelectDay} />
       <div className="daily-plans">
         {effectiveSelectedDay === null ? (
-          <section className="trip-overview-card">
-            <strong>已切换到全程概览</strong>
-            <p>地图只显示住宿、城市阶段和跨城连接。选择具体日期可查看逐项活动和真实交通段。</p>
-          </section>
+          <TripOverview plan={plan} stages={stages} routes={routes} onSelectLeg={onSelectLeg} />
         ) : (
           <>
             <DayTimeline

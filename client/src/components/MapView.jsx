@@ -1,20 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { loadGoogleMaps } from '../services/googleMaps.js';
-import { findDay, modeLabel, validCoordinates } from '../services/planModel.js';
+import { findDay, validCoordinates, validGeometryPoint } from '../services/planModel.js';
+import {
+  collectMappableOverviewNodes,
+  legendForSegments,
+  markerIsSelected,
+  routeSegments,
+  segmentMode,
+  transferPoints,
+  visibleRoutesForSelection,
+} from '../services/mapModel.js';
 
 const DEFAULT_CENTER = { lat: 34.3416, lng: 108.9398 };
-const MODE_COLORS = {
-  WALK: '#16a34a',
-  TRANSIT: '#2563eb',
-  DRIVE: '#7c3aed',
-  TAXI: '#d97706',
-  BICYCLE: '#0891b2',
-  RAIL: '#1d4ed8',
-  FLIGHT: '#64748b',
-  FERRY: '#0e7490',
-  UNKNOWN: '#94a3b8',
-};
-
 function limitGeometry(points, maxPoints = 360) {
   if (!Array.isArray(points) || points.length <= maxPoints) return points || [];
   return Array.from({ length: maxPoints }, (_, index) => {
@@ -80,16 +77,6 @@ function cleanupOverlays(overlays, maps) {
   overlays.infoWindow?.close();
 }
 
-function uniqueById(items) {
-  const seen = new Set();
-  return items.filter((item, index) => {
-    const id = item.id || item.leg_id || `${item.day}-${index}`;
-    if (seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
-}
-
 export default function MapView({
   plan,
   routes = [],
@@ -111,6 +98,25 @@ export default function MapView({
     if (selectedDay === null) return null;
     return findDay(plan, selectedDay) || plan?.daily_plans?.[0] || null;
   }, [plan, selectedDay]);
+
+  const visibleRoutes = useMemo(
+    () => visibleRoutesForSelection(plan, routes, selectedDay),
+    [plan, routes, selectedDay],
+  );
+  const visibleSegments = useMemo(() => visibleRoutes
+    .filter(route => ['success', 'planned', 'available', 'estimated', 'needs_confirmation']
+      .includes(String(route.status || route.route_status || 'unknown').toLowerCase()))
+    .flatMap(routeSegments), [visibleRoutes]);
+  const visibleTransfers = useMemo(() => transferPoints(visibleSegments), [visibleSegments]);
+  const mapLegend = useMemo(() => legendForSegments(visibleSegments), [visibleSegments]);
+  const betaModes = useMemo(() => mapLegend
+    .filter(item => ['WALK', 'BICYCLE'].includes(item.mode))
+    .map(item => item.label), [mapLegend]);
+  const selectedRouteLabel = useMemo(() => {
+    const selected = visibleRoutes.find(route => (route.id || route.leg_id) === selectedLegId);
+    if (!selected) return null;
+    return selected.summary || routeSegments(selected).map(segment => segment.title).filter(Boolean).join(' → ');
+  }, [selectedLegId, visibleRoutes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,32 +203,35 @@ export default function MapView({
       pointCount++;
     };
 
-    const nodes = overview ? [] : Array.isArray(activeDay?.nodes) && activeDay.nodes.length
-      ? activeDay.nodes
-      : (activeDay?.spots || []);
+    const nodes = overview
+      ? collectMappableOverviewNodes(plan)
+      : Array.isArray(activeDay?.nodes) && activeDay.nodes.length
+        ? activeDay.nodes
+        : (activeDay?.spots || []);
     const markerCoordinates = new Set();
     nodes.forEach((node, index) => {
       if (!validCoordinates(node.coordinates)) return;
-      const id = node.id || node.node_id || `day-${dayNumber}-node-${index}`;
+      const nodeDay = overview ? Number(node.overviewDay) : dayNumber;
+      const id = node.id || node.node_id || `day-${nodeDay}-node-${index}`;
       const position = { lat: Number(node.coordinates.lat), lng: Number(node.coordinates.lng) };
-      const label = `${dayNumber}.${index + 1}`;
+      const label = overview ? `D${nodeDay}.${Number(node.overviewIndex ?? index) + 1}` : `${dayNumber}.${index + 1}`;
       const color = ['hotel', 'stay'].includes(node.type) ? '#7c3aed' : '#ef4444';
       const marker = new AdvancedMarkerElement({
         map,
         position,
-        title: `Day ${dayNumber} · ${node.name}`,
+        title: `Day ${nodeDay} · ${node.name}`,
         content: pin(PinElement, label, color, id === selectedNodeId),
         gmpClickable: true,
       });
-      const popup = infoContent(node, dayNumber);
+      const popup = infoContent(node, nodeDay);
       const click = () => {
         overlays.infoWindow.setContent(popup);
         overlays.infoWindow.open({ map, anchor: marker });
-        onSelectNode?.(id, dayNumber);
+        onSelectNode?.(id, overview ? null : nodeDay);
       };
       marker.addEventListener('gmp-click', click);
       overlays.listeners.push(() => marker.removeEventListener('gmp-click', click));
-      overlays.markers.push({ marker, id, label, color, position, popup });
+      overlays.markers.push({ marker, id, label, color, position, popup, selectionType: 'node' });
       markerCoordinates.add(`${position.lat.toFixed(6)},${position.lng.toFixed(6)}`);
       extend(position);
     });
@@ -255,7 +264,7 @@ export default function MapView({
         };
         marker.addEventListener('gmp-click', click);
         overlays.listeners.push(() => marker.removeEventListener('gmp-click', click));
-        overlays.markers.push({ marker, id, label: 'H', color: '#7c3aed', position, popup });
+        overlays.markers.push({ marker, id, label: 'H', color: '#7c3aed', position, popup, selectionType: 'node' });
         extend(position);
       });
 
@@ -281,45 +290,70 @@ export default function MapView({
         };
         marker.addEventListener('gmp-click', click);
         overlays.listeners.push(() => marker.removeEventListener('gmp-click', click));
-        overlays.markers.push({ marker, id, label: 'M', color: '#2563eb', position, popup });
+        overlays.markers.push({ marker, id, label: 'M', color: '#2563eb', position, popup, selectionType: 'node' });
         extend(position);
       });
 
-    const dayLegs = Array.isArray(activeDay?.legs) ? activeDay.legs : [];
-    const visibleRoutes = overview
-      ? routes.filter(route => route.connection_to_day != null)
-      : routes.filter(route => Number(route.day) === dayNumber && route.connection_to_day == null);
-    uniqueById([...dayLegs, ...visibleRoutes])
-      .forEach((leg, index) => {
-        const id = leg.id || leg.leg_id || `leg-${dayNumber}-${index}`;
-        const geometry = limitGeometry(leg.geometry)
-          .filter(point => Array.isArray(point) && point.length === 2
-            && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1])));
+    visibleSegments.forEach((segment, index) => {
+        const id = segment.routeId || segment.id || `leg-${dayNumber}-${index}`;
+        const geometry = limitGeometry(segment.geometry)
+          .filter(validGeometryPoint);
         if (geometry.length < 2) return;
-        const status = leg.status || leg.route_status;
-        if (!['success', 'planned', 'available', 'estimated', 'needs_confirmation'].includes(status)) return;
-        const mode = String(leg.mode || leg.selected_mode || leg.travel_mode || 'UNKNOWN').toUpperCase();
-        const verified = status === 'success' || status === 'planned' || status === 'available';
+        const mode = segmentMode(segment);
+        const flight = mode === 'FLIGHT';
+        const intercity = segment.connection_to_day != null;
         const polyline = new maps.Polyline({
           map,
           path: geometry.map(([lat, lng]) => ({ lat: Number(lat), lng: Number(lng) })),
-          strokeColor: verified ? (MODE_COLORS[mode] || MODE_COLORS.UNKNOWN) : '#94a3b8',
-          strokeOpacity: verified ? 0.9 : 0,
+          strokeColor: segment.color,
+          strokeOpacity: flight ? 0 : overview && !intercity ? 0.48 : 0.92,
           strokeWeight: id === selectedLegId ? 7 : 4,
-          geodesic: !verified,
+          geodesic: flight,
           clickable: true,
-          icons: verified ? undefined : [{
-            icon: { path: 'M 0,-1 0,1', strokeOpacity: 0.8, scale: 3 },
+          icons: flight ? [{
+            icon: { path: 'M 0,-1 0,1', strokeColor: segment.color, strokeOpacity: 0.9, scale: 3 },
             offset: '0',
             repeat: '14px',
-          }],
+          }] : undefined,
         });
         const click = () => onSelectLeg?.(id, dayNumber);
         const listener = polyline.addListener('click', click);
         overlays.listeners.push(listener);
-        overlays.polylines.push({ polyline, id, verified, mode, geometry });
+        overlays.polylines.push({ polyline, id, segmentId: segment.id, mode, geometry });
         geometry.forEach(([lat, lng]) => extend({ lat: Number(lat), lng: Number(lng) }));
       });
+
+    visibleTransfers.forEach((item, index) => {
+      const position = item.coordinates;
+      const marker = new AdvancedMarkerElement({
+        map,
+        position,
+        title: `${item.name} · ${item.from} 换乘 ${item.to}`,
+        content: pin(PinElement, `T${index + 1}`, '#111827', item.routeId === selectedLegId),
+        gmpClickable: true,
+      });
+      const popup = infoContent({
+        ...item,
+        description: `${item.from} → ${item.to}`,
+      }, item.day || item.connection_to_day || '');
+      const click = () => {
+        overlays.infoWindow.setContent(popup);
+        overlays.infoWindow.open({ map, anchor: marker });
+        onSelectLeg?.(item.routeId, overview ? null : dayNumber);
+      };
+      marker.addEventListener('gmp-click', click);
+      overlays.listeners.push(() => marker.removeEventListener('gmp-click', click));
+      overlays.markers.push({
+        marker,
+        id: item.routeId,
+        label: `T${index + 1}`,
+        color: '#111827',
+        position,
+        popup,
+        selectionType: 'leg',
+      });
+      extend(position);
+    });
 
     if (pointCount > 1) map.fitBounds(bounds, { top: 88, right: 64, bottom: 88, left: 64 });
     else if (pointCount === 1) {
@@ -328,29 +362,36 @@ export default function MapView({
     }
 
     return () => cleanupOverlays(overlays, maps);
-  }, [activeDay, onSelectLeg, onSelectNode, plan, ready, routes, selectedDay, transitMarkers]);
+  }, [activeDay, onSelectLeg, onSelectNode, plan, ready, selectedDay, transitMarkers, visibleSegments, visibleTransfers]);
 
   useEffect(() => {
     if (!ready || !apiRef.current || !mapRef.current) return;
     const { PinElement } = apiRef.current;
     const overlays = overlaysRef.current;
     overlays.markers.forEach(item => {
-      item.marker.content = pin(PinElement, item.label, item.color, item.id === selectedNodeId);
-      if (item.id === selectedNodeId) {
+      const selected = markerIsSelected(item, selectedNodeId, selectedLegId);
+      item.marker.content = pin(PinElement, item.label, item.color, selected);
+      if (item.selectionType !== 'leg' && item.id === selectedNodeId) {
         mapRef.current.panTo(item.position);
         if ((mapRef.current.getZoom?.() || 0) < 13) mapRef.current.setZoom(13);
         overlays.infoWindow.setContent(item.popup);
         overlays.infoWindow.open({ map: mapRef.current, anchor: item.marker });
       }
     });
+    const selectedBounds = new apiRef.current.maps.LatLngBounds();
+    let selectedPointCount = 0;
     overlays.polylines.forEach(item => {
       item.polyline.setOptions({ strokeWeight: item.id === selectedLegId ? 7 : 4 });
       if (item.id === selectedLegId && item.geometry.length) {
-        const bounds = new apiRef.current.maps.LatLngBounds();
-        item.geometry.forEach(([lat, lng]) => bounds.extend({ lat, lng }));
-        mapRef.current.fitBounds(bounds, { top: 100, right: 80, bottom: 100, left: 80 });
+        item.geometry.forEach(([lat, lng]) => {
+          selectedBounds.extend({ lat, lng });
+          selectedPointCount++;
+        });
       }
     });
+    if (selectedPointCount > 1) {
+      mapRef.current.fitBounds(selectedBounds, { top: 100, right: 80, bottom: 100, left: 80 });
+    }
   }, [ready, selectedLegId, selectedNodeId]);
 
   return (
@@ -377,11 +418,28 @@ export default function MapView({
           <span>{selectedDay === null ? `${plan.stages?.length || plan.destinations?.length || 1} 个城市阶段` : activeDay?.city || activeDay?.theme}</span>
         </div>
       )}
-      {selectedLegId && (
-        <div className="map-legend" aria-live="polite">
-          已选择交通段 · {modeLabel(
-            activeDay?.legs?.find(leg => (leg.id || leg.leg_id) === selectedLegId)?.mode,
-          )}
+      {ready && mapLegend.length > 0 && (
+        <div className="map-route-legend" aria-label="交通线路图例">
+          <strong>交通线路</strong>
+          {mapLegend.map(item => (
+            <span key={`${item.mode}-${item.color}`}>
+              <i style={{ backgroundColor: item.color }} aria-hidden="true" />
+              {item.label}
+            </span>
+          ))}
+        </div>
+      )}
+      {ready && betaModes.length > 0 && (
+        <div className="map-route-beta-warning" role="note">
+          {betaModes.join('、')} Beta 路线在部分地区可能缺少清晰的人行道或骑行路径信息。
+        </div>
+      )}
+      {selectedLegId && selectedRouteLabel && (
+        <div className="map-selection-badge" aria-live="polite">已选择 · {selectedRouteLabel}</div>
+      )}
+      {ready && (
+        <div className="google-route-attribution">
+          Powered by Google, ©{new Date().getFullYear()} Google
         </div>
       )}
     </div>
