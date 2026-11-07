@@ -1,4 +1,5 @@
 import { profilePrompt } from './preferences.js';
+import { hasWorkersAI, requestWorkersAiJson } from './workersAi.js';
 
 const LONG_TRIP_THRESHOLD_DAYS = 12;
 const DETAIL_CHUNK_SIZE = 7;
@@ -164,8 +165,21 @@ function llmConfig() {
   };
 }
 
+async function requestWorkersFallback(systemPrompt, userContent, maxTokens, reason) {
+  console.warn(`[LLM] ${reason}，使用 Cloudflare Workers AI 后备模型`);
+  const fallback = await requestWorkersAiJson(systemPrompt, userContent, { maxTokens });
+  return typeof fallback === 'object' ? fallback : parseJsonContent(fallback);
+}
+
 async function requestJson(systemPrompt, userContent, { maxTokens = DEFAULT_MAX_TOKENS } = {}) {
-  const { apiKey, baseUrl, model } = llmConfig();
+  let config;
+  try {
+    config = llmConfig();
+  } catch (error) {
+    if (!hasWorkersAI()) throw error;
+    return requestWorkersFallback(systemPrompt, userContent, maxTokens, 'DeepSeek 未配置');
+  }
+  const { apiKey, baseUrl, model } = config;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 180000);
   let response;
@@ -190,6 +204,10 @@ async function requestJson(systemPrompt, userContent, { maxTokens = DEFAULT_MAX_
       }),
     });
   } catch (error) {
+    if (hasWorkersAI()) {
+      const reason = error.name === 'AbortError' ? 'DeepSeek 请求超时' : 'DeepSeek 网络请求失败';
+      return requestWorkersFallback(systemPrompt, userContent, maxTokens, reason);
+    }
     if (error.name === 'AbortError') throw new Error('DeepSeek API 请求超时');
     throw error;
   } finally {
@@ -198,6 +216,14 @@ async function requestJson(systemPrompt, userContent, { maxTokens = DEFAULT_MAX_
 
   if (!response.ok) {
     const err = await response.text();
+    const balanceUnavailable = response.status === 402 || /insufficient[ _-]?balance/i.test(err);
+    const transientUnavailable = response.status === 429 || response.status >= 500;
+    if ((balanceUnavailable || transientUnavailable) && hasWorkersAI()) {
+      const reason = balanceUnavailable
+        ? 'DeepSeek 余额不足'
+        : `DeepSeek 暂时不可用 (${response.status})`;
+      return requestWorkersFallback(systemPrompt, userContent, maxTokens, reason);
+    }
     throw new Error(`DeepSeek API error: ${response.status} - ${err}`);
   }
 

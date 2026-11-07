@@ -9,9 +9,12 @@
     "install:all": "npm install && cd server && npm install && cd ../client && npm install",
     "test": "npm --prefix server test && npm --prefix client test",
     "build": "npm --prefix client run build",
-    "check": "npm test && npm run build"
+    "check": "npm test && npm run build",
+    "cloudflare:dev": "npm run build && wrangler dev",
+    "cloudflare:deploy": "npm run check && wrangler deploy"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "wrangler": "^4.158.0"
   }
 }

@@ -7,6 +7,7 @@ import {
   parseJsonContent,
   requestedDaysFromText,
 } from '../services/llm.js';
+import { configureWorkersAI } from '../services/workersAi.js';
 
 const COMPLEX_QUERY = '我想去塞尔维亚，波黑，克罗地亚，意大利，瑞士，法国。帮我设计一个完整的旅游路线，总时长28天，预算中等，旅行节奏轻松，塞尔维亚开始，法国结束，欧洲内部交通用火车';
 
@@ -192,5 +193,78 @@ test('单次输出被 length 截断时会自动重试而不是直接返回解析
     assert.equal(callCount, 2);
   } finally {
     global.fetch = originalFetch;
+  }
+});
+
+test('DeepSeek 余额不足时使用 Cloudflare Workers AI 后备模型', async () => {
+  const originalFetch = global.fetch;
+  const originalKey = process.env.DEEPSEEK_API_KEY;
+  let fallbackCalls = 0;
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  global.fetch = async () => new Response(JSON.stringify({
+    error: { message: 'Insufficient Balance', code: 'invalid_request_error' },
+  }), { status: 402, headers: { 'Content-Type': 'application/json' } });
+  configureWorkersAI({
+    async run(model, input) {
+      fallbackCalls++;
+      assert.equal(model, '@cf/meta/llama-3.3-70b-instruct-fp8-fast');
+      assert.equal(input.response_format.type, 'json_object');
+      return {
+        response: JSON.stringify({
+          status: 'success',
+          plan: {
+            city: '京都', country: '日本', days: 1,
+            destinations: [{ city: '京都', country: '日本', start_day: 1, end_day: 1 }],
+            daily_plans: [{ day: 1, city: '京都', country: '日本', spots: [] }],
+          },
+        }),
+      };
+    },
+  });
+
+  try {
+    const result = await callLLM('京都1天旅行');
+    assert.equal(result.plan.city, '京都');
+    assert.equal(result.plan.daily_plans.length, 1);
+    assert.equal(fallbackCalls, 1);
+  } finally {
+    configureWorkersAI(null);
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = originalKey;
+  }
+});
+
+test('DeepSeek 瞬态网络故障时使用 Cloudflare Workers AI 后备模型', async () => {
+  const originalFetch = global.fetch;
+  const originalKey = process.env.DEEPSEEK_API_KEY;
+  let fallbackCalls = 0;
+  process.env.DEEPSEEK_API_KEY = 'test-key';
+  global.fetch = async () => { throw new TypeError('fetch failed'); };
+  configureWorkersAI({
+    async run() {
+      fallbackCalls++;
+      return {
+        response: {
+          status: 'success',
+          plan: {
+            city: '大阪', country: '日本', days: 1,
+            destinations: [{ city: '大阪', country: '日本', start_day: 1, end_day: 1 }],
+            daily_plans: [{ day: 1, city: '大阪', country: '日本', spots: [] }],
+          },
+        },
+      };
+    },
+  });
+
+  try {
+    const result = await callLLM('大阪1天旅行');
+    assert.equal(result.plan.city, '大阪');
+    assert.equal(fallbackCalls, 1);
+  } finally {
+    configureWorkersAI(null);
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = originalKey;
   }
 });

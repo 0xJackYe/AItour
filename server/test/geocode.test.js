@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   cityContextFromGeocoderResult,
+  geocodeAllSpots,
   geocodeCity,
   isInTargetCity,
   placeNameMatches,
@@ -32,6 +33,38 @@ function place(latitude, longitude, countryCode = 'JP', administrativeName = 'To
 
 test('东京范围内候选通过城市硬边界', () => {
   assert.equal(isInTargetCity(place(35.7148, 139.7967), tokyoContext), true);
+});
+
+test('Google Maps 权限异常时保留计划并返回 provider warning', async () => {
+  const originalFetch = global.fetch;
+  const originalKey = process.env.GOOGLE_MAPS_API_KEY;
+  process.env.GOOGLE_MAPS_API_KEY = 'test-key';
+  global.fetch = async () => new Response(JSON.stringify({
+    error: { code: 403, message: 'The caller does not have permission' },
+  }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+
+  try {
+    const result = await geocodeAllSpots({
+      city: '京都',
+      country: '日本',
+      daily_plans: [{
+        day: 1,
+        city: '京都',
+        country: '日本',
+        spots: [{ name: '清水寺', name_en: 'Kiyomizu-dera' }],
+      }],
+    });
+    assert.equal(result.plan.daily_plans[0].spots.length, 1);
+    assert.equal(result.plan.daily_plans[0].spots[0].location_status, 'unverified');
+    const providerWarning = result.warnings.find(warning => warning.code === 'provider_error');
+    assert.ok(providerWarning);
+    assert.equal(providerWarning.removed, false);
+    assert.equal(result.rejectedSpots.length, 0);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.GOOGLE_MAPS_API_KEY;
+    else process.env.GOOGLE_MAPS_API_KEY = originalKey;
+  }
 });
 
 test('静冈同名候选即使文本相同也会被城市硬边界拒绝', () => {

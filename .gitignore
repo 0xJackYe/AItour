@@ -15,6 +15,7 @@ coverage/
 
 # Local tooling and editor state
 .claude/
+.wrangler/
 .vscode/
 .idea/
 *.local

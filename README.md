@@ -5,7 +5,7 @@ AItour 是一个连续、可执行、可局部调整的 AI 旅行规划应用。
 ## 核心能力
 
 - 生成前补全旅行天数、预算、节奏和交通优先级，并可进一步填写开始日期、预算硬上限、同行人、允许/避免交通、步行上限、作息、住宿、饮食及无障碍需求。
-- DeepSeek 生成候选行程并进行内容覆盖复核；结构化偏好会作为硬约束注入短行程和长行程工作流。
+- DeepSeek 生成候选行程并进行内容覆盖复核；余额不足、限流、服务端错误或网络故障时，Cloudflare Workers AI 会接管计划生成。
 - 12 天及以上的长行程采用“完整骨架 + 每 7 天分段细化”的工作流，避免超长 JSON 被截断。
 - 每天拥有稳定 ID、住宿起终点、活动节点、逐段 Leg、时间轴和相邻日连接；换城时明确显示跨城方式、估时及确认状态。
 - WALK、TRANSIT、DRIVE、BICYCLE 逐段请求 Google Routes；RAIL、FLIGHT 明确标记为需确认班次，只提供估时，不伪造地图折线。
@@ -20,7 +20,8 @@ AItour 是一个连续、可执行、可局部调整的 AI 旅行规划应用。
 ## 技术栈
 
 - 前端：React 18、Vite 7、Google Maps JavaScript API、IndexedDB
-- 后端：Node.js、Express、DeepSeek Chat Completions API
+- 后端：Node.js、Express 5、DeepSeek Chat Completions API、Cloudflare Workers AI
+- 部署：Cloudflare Workers + Static Assets，同一域名提供 React 与 `/api/*`
 - 地图数据：Google Places API、Geocoding API、Routes API
 - 测试：Node.js 内置测试运行器
 
@@ -114,6 +115,21 @@ npm audit --prefix client --registry=https://registry.npmjs.org
 
 当前自动化测试覆盖结构化偏好、中文天数、预算口径、稳定 ID、酒店首尾、逐段交通选择、真实路线/失败语义、时间轴、跨城连接、健康检查、HTTP 接口、长行程分段、地理边界、前端快照、竞态保护及撤销/重做。GitHub Actions 会自动执行测试、构建和三层依赖审计。
 
+## Cloudflare 公网部署
+
+当前完整前后端部署地址：[https://ai.0xjackye.workers.dev](https://ai.0xjackye.workers.dev)。
+
+首次部署先登录 Wrangler，并把服务端密钥保存为 Worker Secret：
+
+```bash
+npx wrangler login
+npx wrangler secret put DEEPSEEK_API_KEY
+npx wrangler secret put GOOGLE_MAPS_API_KEY
+npm run cloudflare:deploy
+```
+
+`wrangler.jsonc` 已配置静态资源、SPA 回退、Express Worker 入口和 Workers AI binding。`VITE_GOOGLE_MAPS_API_KEY` 是构建时公开的浏览器 Key，需在本地 `.env.local` 中配置后重新构建部署；它必须启用 Maps JavaScript API、限制到线上 HTTP referrer，并且对应 Google Cloud 项目必须已启用 Billing。服务端 Google Key 还需启用 Places API (New)、Geocoding API 与 Routes API。没有有效的 Google 配置时，系统会保留 AI 计划并返回明确的地图/路线警告，而不会让整次生成请求失败。
+
 ## 目录结构
 
 ```text
@@ -122,11 +138,12 @@ AItour/
 │  └─ src/
 │     ├─ components/      输入、计划、地图、交通、校验和历史面板
 │     └─ services/        API、Google Maps 加载与 IndexedDB
-├─ server/                 Express 后端
+├─ server/                 Express 后端及 Cloudflare Worker 入口
 │  ├─ routes/plan.js      完整规划工作流编排
 │  ├─ services/           LLM、Google、地理编码、路线、交通和自审
 │  └─ test/               自动化回归测试
 ├─ .env.example            环境变量模板
+├─ wrangler.jsonc          Cloudflare Workers 与 Static Assets 配置
 ├─ CHANGELOG.md            完整项目更新日志
 ├─ prompt.md               项目原始需求说明
 └─ start.bat               Windows 启动脚本
@@ -139,6 +156,6 @@ AItour/
 - 预算只汇总币种一致、计价口径明确且有合理估算的数据；`null`、空值、异币种和语义不明费用不会被当成 0 元，覆盖不足会明确警告。
 - 未填写开始日期时，公共交通结果会标记为待复核；路线服务失败时只保留明确标注的估时，且不会为了“跑通”而回退成长距离步行。
 - 历史记录仅保存在当前浏览器，清除站点数据后会丢失。
-- 项目尚未提供账号系统、云端同步、部署配置和移动端原生应用。
+- 项目尚未提供账号系统、云端同步和移动端原生应用。
 
 详细演进过程与验证结果见 [CHANGELOG.md](./CHANGELOG.md)。

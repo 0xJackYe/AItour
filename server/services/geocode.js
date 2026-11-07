@@ -454,6 +454,22 @@ async function findPlace(query, city, country, cityContext) {
   };
 }
 
+function providerErrorResult(error) {
+  const message = String(error?.message || '未知错误');
+  let reason = `Google Maps 地图服务暂时不可用：${message}`;
+  if (/enable billing|billing account|billing/i.test(message)) {
+    reason = 'Google Maps 项目未启用结算，暂时无法验证地点坐标';
+  } else if (/permission|forbidden|api key/i.test(message)) {
+    reason = 'Google Maps API 权限不足，暂时无法验证地点坐标';
+  }
+  return {
+    coordinates: null,
+    place: null,
+    status: 'provider_error',
+    reason,
+  };
+}
+
 export async function geocode(query, city = '', country = '') {
   const cityContext = city ? await geocodeCity(city, country) : null;
   const result = await findPlace(query, city, country, cityContext);
@@ -461,15 +477,20 @@ export async function geocode(query, city = '', country = '') {
 }
 
 async function locateSpot(spot, city, country, cityContext) {
-  const primary = spot.name_en || spot.name;
-  let result = await findPlace(primary, city, country, cityContext);
-  if (!result.coordinates && spot.name_en && spot.name_en !== spot.name) {
-    const fallback = await findPlace(spot.name, city, country, cityContext);
-    if (fallback.coordinates || (result.status === 'not_found' && fallback.status !== 'not_found')) {
-      result = fallback;
+  try {
+    const primary = spot.name_en || spot.name;
+    let result = await findPlace(primary, city, country, cityContext);
+    if (!result.coordinates && spot.name_en && spot.name_en !== spot.name) {
+      const fallback = await findPlace(spot.name, city, country, cityContext);
+      if (fallback.coordinates || (result.status === 'not_found' && fallback.status !== 'not_found')) {
+        result = fallback;
+      }
     }
+    return result;
+  } catch (error) {
+    console.warn(`[Geocode] 地点定位失败 (${spot.name}, ${city}): ${error.message}`);
+    return providerErrorResult(error);
   }
-  return result;
 }
 
 export function spotLocationKey(dayIndex, spotIndex) {
@@ -574,9 +595,17 @@ export async function geocodeAllSpots(plan) {
       job.country,
       job.cityContext,
     )),
-    mapWithConcurrency(accommodationJobs, 4, job => job.accommodation.landmark
-      ? findPlace(job.accommodation.landmark, job.city, job.country, job.context)
-      : Promise.resolve({ coordinates: null, status: 'not_found', reason: '没有住宿地标' })),
+    mapWithConcurrency(accommodationJobs, 4, async (job) => {
+      if (!job.accommodation.landmark) {
+        return { coordinates: null, status: 'not_found', reason: '没有住宿地标' };
+      }
+      try {
+        return await findPlace(job.accommodation.landmark, job.city, job.country, job.context);
+      } catch (error) {
+        console.warn(`[Geocode] 住宿定位失败 (${job.accommodation.landmark}, ${job.city}): ${error.message}`);
+        return providerErrorResult(error);
+      }
+    }),
   ]);
   const spotResultByKey = new Map();
   let geocodedCount = 0;
