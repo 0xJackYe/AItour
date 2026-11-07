@@ -19,7 +19,7 @@ import { mapWithConcurrency } from '../lib/async.js';
 import { currentSignal } from '../lib/context.js';
 import { haversineKm, isInsideViewport, viewportDiagonalKm } from '../lib/geo.js';
 import { log } from '../lib/log.js';
-import { geocodeAddress, isGoogleConfigured, placeToCoordinates, searchPlacesText } from './google.js';
+import { isGoogleConfigured, placeToCoordinates, searchPlacesText } from './google.js';
 import { destinationForDay, isMultiCityLabel, singleCountry } from './planSchema.js';
 
 export const DEFAULT_METRO_RADIUS_KM = 40;
@@ -37,19 +37,24 @@ export function metroRadiusKm(viewport) {
   return Math.min(MAX_METRO_RADIUS_KM, Math.max(DEFAULT_METRO_RADIUS_KM, diagonal * 0.75));
 }
 
-function normalizeViewport(geometry) {
-  const viewport = geometry?.bounds || geometry?.viewport;
-  if (!viewport?.southwest || !viewport?.northeast) return null;
-  return {
-    low: { latitude: viewport.southwest.lat, longitude: viewport.southwest.lng },
-    high: { latitude: viewport.northeast.lat, longitude: viewport.northeast.lng },
-  };
-}
+// 城市级地点类型：用于从 Places 搜索结果中挑出“城市本身”而不是城市里的某个店铺。
+const CITY_PLACE_TYPES = new Set([
+  'locality',
+  'postal_town',
+  'administrative_area_level_1',
+  'administrative_area_level_2',
+  'administrative_area_level_3',
+  'colloquial_area',
+  'sublocality',
+]);
 
-function geocoderCountryCode(result) {
-  return result?.address_components
-    ?.find(component => component.types?.includes('country'))
-    ?.short_name?.toUpperCase() || null;
+function placeViewport(place) {
+  const viewport = place?.viewport;
+  if (!viewport?.low || !viewport?.high) return null;
+  return {
+    low: { latitude: viewport.low.latitude, longitude: viewport.low.longitude },
+    high: { latitude: viewport.high.latitude, longitude: viewport.high.longitude },
+  };
 }
 
 function normalizeAdministrativeName(value = '') {
@@ -62,8 +67,8 @@ function normalizeAdministrativeName(value = '') {
     .replace(/[^\p{L}\p{N}]/gu, '');
 }
 
-function targetAdministrativeNames(city, result) {
-  const firstAdministrative = result?.address_components?.find(component =>
+function targetAdministrativeNames(city, place) {
+  const firstAdministrative = place?.addressComponents?.find(component =>
     component.types?.some(type =>
       type === 'locality'
       || type === 'postal_town'
@@ -71,8 +76,9 @@ function targetAdministrativeNames(city, result) {
   );
   return [...new Set([
     city,
-    firstAdministrative?.long_name,
-    firstAdministrative?.short_name,
+    place?.displayName?.text,
+    firstAdministrative?.longText,
+    firstAdministrative?.shortText,
   ].map(normalizeAdministrativeName).filter(Boolean))];
 }
 
@@ -210,22 +216,24 @@ export function placeNameMatches(place, expectedName, city = '', country = '') {
 export async function geocodeCity(city, country = '') {
   if (!city) return null;
   try {
+    // 使用 Places (New) 文本搜索定位城市：与其他 Google 调用一样通过请求头携带 Key
+    // （不再把 Key 放进 URL），也不再需要单独启用 Geocoding API。
     // 城市锚点用英文返回，才能稳定比较 Tokyo/Shizuoka、Roma/Firenze 等行政区名称。
-    const results = await geocodeAddress([city, country].filter(Boolean).join(', '), 'en');
-    const result = results[0];
-    if (!result?.geometry?.location) return null;
-    const viewport = normalizeViewport(result.geometry);
+    const places = await searchPlacesText([city, country].filter(Boolean).join(', '), { pageSize: 3, languageCode: 'en' });
+    const place = places.find(item => (item.types || []).some(type => CITY_PLACE_TYPES.has(type))) || places[0];
+    if (!place?.location) return null;
+    const viewport = placeViewport(place);
     return {
-      lat: result.geometry.location.lat,
-      lng: result.geometry.location.lng,
-      display_name: result.formatted_address,
+      lat: place.location.latitude,
+      lng: place.location.longitude,
+      display_name: place.formattedAddress || place.displayName?.text || city,
       viewport,
       radiusKm: metroRadiusKm(viewport),
-      place_id: result.place_id || null,
+      place_id: place.id || null,
       cityName: city,
       countryName: country,
-      countryCode: geocoderCountryCode(result),
-      targetAdministrativeNames: targetAdministrativeNames(city, result),
+      countryCode: placeCountryCode(place),
+      targetAdministrativeNames: targetAdministrativeNames(city, place),
     };
   } catch (error) {
     if (isAbortError(error)) throw error;

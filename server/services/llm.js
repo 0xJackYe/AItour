@@ -13,14 +13,17 @@ import { currentSignal, recordStat } from '../lib/context.js';
 import { log } from '../lib/log.js';
 import { getConfig } from '../config.js';
 import { analyzeDays, analyzeQuery } from './intent.js';
+import { toMinutes } from './schedule.js';
 import {
   destinationForDay,
   durationHours,
   findMissingDays,
   isMultiCityLabel,
   mergeDays,
+  normalizeClock,
   normalizeDay,
   normalizePlan as normalizePlanSchema,
+  normalizeSpot,
   planOutline,
   positiveInt,
   singleCountry,
@@ -35,9 +38,14 @@ import {
 } from './prompts.js';
 
 export const LONG_TRIP_THRESHOLD_DAYS = 8;
-export const DETAIL_CHUNK_SIZE = 5;
-const DETAIL_CONCURRENCY = 3;
-const DEFAULT_MAX_TOKENS = 8192;
+// 细化分段越小，模型越能稳定地写足细节；并发执行，总耗时基本不变。
+export const DETAIL_CHUNK_SIZE = 3;
+const DETAIL_CONCURRENCY = 4;
+const MIN_DESCRIPTION_CHARS = 25;
+// 当前 DeepSeek 模型单次可输出数十万 token；16K 足以容纳 7 天的详细行程，
+// 又不会让单次生成过慢（更长的行程走分段生成）。
+const DEFAULT_MAX_TOKENS = 16384;
+const DETAIL_MAX_TOKENS = 12288;
 const FALLBACK_TO_CHUNKED = new Set([
   'LLM_OUTPUT_TRUNCATED',
   'LLM_INVALID_JSON',
@@ -403,7 +411,7 @@ async function completeMissingDays(query, plan, { intent, compact, onProgress })
     const responses = await mapWithConcurrency(groups, DETAIL_CONCURRENCY, async (group) => {
       try {
         return await requestJsonWithRetry(repairPrompt({ compact }), buildRepairMessage(query, current, group, intent), {
-          maxTokens: compact ? 4096 : DEFAULT_MAX_TOKENS,
+          maxTokens: compact ? DETAIL_MAX_TOKENS : DEFAULT_MAX_TOKENS,
           purpose: 'repair',
         });
       } catch (error) {
@@ -456,7 +464,7 @@ async function generateSinglePlan(query, { intent, feedback, onProgress }) {
     purpose: 'plan',
     // 截断说明行程太长，直接降级为分段生成比“请写短一点”更可靠。
     noRetryCodes: ['LLM_OUTPUT_TRUNCATED'],
-    onDelta: streamReporter(onProgress, { message: 'AI 正在规划行程', expectedChars: 1000 * days + 800 }),
+    onDelta: streamReporter(onProgress, { message: 'AI 正在规划行程', expectedChars: 1800 * days + 1200 }),
   });
   return finalizeGeneration(query, result, { intent, compact: false, onProgress });
 }
@@ -478,20 +486,64 @@ function skeletonDay(day) {
   };
 }
 
-function mergeDetailedDay(outlineDay, detailedDay) {
+function withDetail(spot, detail) {
+  return {
+    ...spot,
+    start_time: normalizeClock(detail.start_time) || spot.start_time || null,
+    duration_hours: durationHours(detail.duration_hours) ?? spot.duration_hours ?? 2,
+    cost: text(detail.cost, 40) || spot.cost || '',
+    description: text(detail.description, 200) || spot.description || '',
+    tips: text(detail.tips, 120) || spot.tips || '',
+  };
+}
+
+const nameKey = value => String(value || '')
+  .toLowerCase()
+  .replace(/[（(][^）)]*[）)]/g, '')
+  .replace(/[^\p{L}\p{N}]/gu, '');
+
+/** 模型回填时常会改写名称（加括号注释、英文名、空格），按宽松规则判断是否同一地点。 */
+export function sameSpotName(left, right) {
+  const a = nameKey(left?.name);
+  const b = nameKey(right?.name);
+  if (a && b && (a === b || (Math.min(a.length, b.length) >= 2 && (a.includes(b) || b.includes(a))))) return true;
+  const enA = nameKey(left?.name_en);
+  const enB = nameKey(right?.name_en);
+  return Boolean(enA && enB && (enA === enB || (Math.min(enA.length, enB.length) >= 4 && (enA.includes(enB) || enB.includes(enA)))));
+}
+
+/**
+ * 合并细化结果：骨架地点全部保留（按名称匹配），细化阶段补充的餐厅按时间插入。
+ * 细化输出明显没有遵循骨架时，退回按序号合并且不接受新增地点。
+ */
+export function mergeDetailedDay(outlineDay, detailedDay) {
   if (!detailedDay) return outlineDay;
-  const detailedSpots = Array.isArray(detailedDay.spots) ? detailedDay.spots : [];
-  const spots = outlineDay.spots.map((spot, index) => {
-    const detail = detailedSpots.find(item => item?.name === spot.name || (item?.name_en && item.name_en === spot.name_en))
-      || detailedSpots[index]
-      || {};
-    return {
-      ...spot,
-      duration_hours: durationHours(detail.duration_hours) ?? spot.duration_hours ?? 2,
-      description: text(detail.description, 160) || spot.description || '',
-      tips: text(detail.tips, 120) || spot.tips || '',
-    };
-  });
+  const outlineSpots = outlineDay.spots || [];
+  const detailedSpots = (Array.isArray(detailedDay.spots) ? detailedDay.spots : []).filter(item => item && typeof item === 'object');
+  const used = new Set();
+  const merged = [];
+  let matched = 0;
+  for (const item of detailedSpots) {
+    const index = outlineSpots.findIndex((spot, position) => !used.has(position) && sameSpotName(item, spot));
+    if (index >= 0) {
+      used.add(index);
+      matched++;
+      merged.push(withDetail(outlineSpots[index], item));
+      continue;
+    }
+    const added = normalizeSpot(item, { city: outlineDay.city, country: outlineDay.country });
+    if (added?.type === 'restaurant') merged.push(added);
+  }
+
+  let spots;
+  if (outlineSpots.length > 0 && matched < Math.ceil(outlineSpots.length / 2)) {
+    spots = outlineSpots.map((spot, index) => withDetail(spot, detailedSpots[index] || {}));
+  } else {
+    outlineSpots.forEach((spot, index) => {
+      if (!used.has(index)) merged.push(spot);
+    });
+    spots = merged.slice(0, 12);
+  }
   return {
     ...outlineDay,
     theme: text(detailedDay.theme, 40) || outlineDay.theme,
@@ -506,7 +558,7 @@ async function generateLongPlan(query, { intent, feedback, onProgress }) {
   const outline = await requestJsonWithRetry(LONG_OUTLINE_PROMPT, buildUserMessage(query, { intent, feedback }), {
     maxTokens: DEFAULT_MAX_TOKENS,
     purpose: 'outline',
-    onDelta: streamReporter(onProgress, { message: '正在生成完整行程骨架', expectedChars: 420 * days + 1200, to: 0.45 }),
+    onDelta: streamReporter(onProgress, { message: '正在生成完整行程骨架', expectedChars: 520 * days + 1600, to: 0.45 }),
   });
   const skeleton = await finalizeGeneration(query, outline, { intent, compact: true, onProgress });
   if (skeleton.status !== 'success') return skeleton;
@@ -520,7 +572,7 @@ async function generateLongPlan(query, { intent, feedback, onProgress }) {
       return await requestJsonWithRetry(
         DETAIL_PROMPT,
         `【用户原需求】\n${query}\n\n【不可更改的行程骨架】\n${JSON.stringify({ daily_plans: days.map(skeletonDay) })}`,
-        { maxTokens: 4096, purpose: 'detail' },
+        { maxTokens: DETAIL_MAX_TOKENS, purpose: 'detail' },
       );
     } catch (error) {
       if (isAbortError(error) || currentSignal()?.aborted) throw error;
@@ -544,22 +596,102 @@ async function generateLongPlan(query, { intent, feedback, onProgress }) {
   };
 }
 
+// ───────────────────────────── 细节质量闸门 ─────────────────────────────
+
+const chars = value => [...String(value || '')].length;
+
+/** 一天里让人“没法照着走”的缺口：介绍过短、缺餐、缺时间。 */
+export function dayDetailGaps(day, { isLastDay = false } = {}) {
+  const gaps = [];
+  const spots = day.spots || [];
+  const content = spots.filter(spot => spot.type !== 'transport');
+  const thin = content.filter(spot => chars(spot.description) < MIN_DESCRIPTION_CHARS).length;
+  if (content.length && thin / content.length > 0.3) gaps.push('地点介绍过于简短，请写足看点与体验');
+  const mealAt = (from, to) => spots.some((spot) => {
+    const minutes = toMinutes(spot.start_time);
+    return spot.type === 'restaurant' && minutes !== null && minutes >= from && minutes <= to;
+  });
+  const lunch = mealAt(11 * 60, 14 * 60 + 30);
+  const dinner = mealAt(17 * 60, 21 * 60);
+  // 换城市的日子和最后一天允许只安排一顿。
+  const relaxedMeals = isLastDay || spots.some(spot => spot.type === 'transport');
+  if (!lunch && !dinner) gaps.push('缺少午餐和晚餐');
+  else if (!relaxedMeals && !lunch) gaps.push('缺少午餐');
+  else if (!relaxedMeals && !dinner) gaps.push('缺少晚餐');
+  if (spots.some(spot => !spot.start_time)) gaps.push('缺少时间安排');
+  if (spots.length >= 2 && chars(day.transport_notes) < 6) gaps.push('缺少当天交通建议');
+  return gaps;
+}
+
+function detailScore(day, options) {
+  const content = (day.spots || []).filter(spot => spot.type !== 'transport');
+  const described = content.filter(spot => chars(spot.description) >= MIN_DESCRIPTION_CHARS).length;
+  return described - 3 * dayDetailGaps(day, options).length;
+}
+
+/** 对未达标的天做一次定向细化；结果只在更好时才采用，不会变差。 */
+async function enrichThinDays(query, plan, { onProgress }) {
+  const total = plan.daily_plans.length;
+  const options = index => ({ isLastDay: index === total - 1 });
+  const targets = plan.daily_plans
+    .map((day, index) => ({ day, gaps: dayDetailGaps(day, options(index)) }))
+    .filter(item => item.gaps.length > 0);
+  if (targets.length === 0) return plan;
+  log.info('llm.enrich_days', { days: targets.map(item => item.day.day) });
+  onProgress?.({ stage: 'generate', message: `正在补充 ${targets.length} 天的细节…` });
+
+  const groups = chunk(targets, DETAIL_CHUNK_SIZE);
+  const responses = await mapWithConcurrency(groups, DETAIL_CONCURRENCY, async (group) => {
+    const issues = group.map(item => `Day ${item.day.day}：${item.gaps.join('；')}`).join('\n');
+    try {
+      return await requestJsonWithRetry(
+        DETAIL_PROMPT,
+        `【用户原需求】\n${query}\n\n【需要改进的地方】\n${issues}\n\n【不可更改的行程骨架】\n${JSON.stringify({ daily_plans: group.map(item => skeletonDay(item.day)) })}`,
+        { maxTokens: DETAIL_MAX_TOKENS, purpose: 'enrich' },
+      );
+    } catch (error) {
+      if (isAbortError(error) || currentSignal()?.aborted) throw error;
+      log.warn('llm.enrich_failed', { days: group.map(item => item.day.day), code: error.code, message: error.message });
+      return null;
+    }
+  });
+
+  const byDay = new Map(responses
+    .flatMap(response => (Array.isArray(response?.daily_plans) ? response.daily_plans : []))
+    .map(day => [positiveInt(day?.day), day]));
+  return {
+    ...plan,
+    daily_plans: plan.daily_plans.map((day, index) => {
+      const detail = byDay.get(day.day);
+      if (!detail) return day;
+      const candidate = mergeDetailedDay(day, detail);
+      return detailScore(candidate, options(index)) > detailScore(day, options(index)) ? candidate : day;
+    }),
+  };
+}
+
 /**
  * 生成结构化行程。返回 { status, plan?, clarification_questions?, strategy }。
  * 第二个参数 feedback 为自审/地图校验后的修正要求（重生成时使用）。
  */
 export async function callLLM(userMessage, feedback = null, { intent = analyzeQuery(userMessage), onProgress = null } = {}) {
   const strategyDays = intent.strategyDays ?? intent.days ?? 0;
+  let result;
   if (strategyDays >= LONG_TRIP_THRESHOLD_DAYS) {
     log.info('llm.strategy', { strategy: 'chunked', days: strategyDays });
-    return { ...(await generateLongPlan(userMessage, { intent, feedback, onProgress })), strategy: 'chunked' };
+    result = { ...(await generateLongPlan(userMessage, { intent, feedback, onProgress })), strategy: 'chunked' };
+  } else {
+    try {
+      result = { ...(await generateSinglePlan(userMessage, { intent, feedback, onProgress })), strategy: 'single' };
+    } catch (error) {
+      if (!(error instanceof LLMOutputError) || !FALLBACK_TO_CHUNKED.has(error.code)) throw error;
+      log.warn('llm.fallback_chunked', { code: error.code, message: error.message });
+      onProgress?.({ stage: 'generate', message: '行程较长，改为分段生成…', fraction: 0.05 });
+      result = { ...(await generateLongPlan(userMessage, { intent, feedback, onProgress })), strategy: 'chunked-fallback' };
+    }
   }
-  try {
-    return { ...(await generateSinglePlan(userMessage, { intent, feedback, onProgress })), strategy: 'single' };
-  } catch (error) {
-    if (!(error instanceof LLMOutputError) || !FALLBACK_TO_CHUNKED.has(error.code)) throw error;
-    log.warn('llm.fallback_chunked', { code: error.code, message: error.message });
-    onProgress?.({ stage: 'generate', message: '行程较长，改为分段生成…', fraction: 0.05 });
-    return { ...(await generateLongPlan(userMessage, { intent, feedback, onProgress })), strategy: 'chunked-fallback' };
+  if (result.status === 'success' && result.plan) {
+    result.plan = await enrichThinDays(userMessage, result.plan, { onProgress });
   }
+  return result;
 }

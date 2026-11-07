@@ -19,6 +19,7 @@ import { optimizePlanOrder } from './optimize.js';
 import { deterministicWarnings } from './planSchema.js';
 import { PROMPT_VERSION } from './prompts.js';
 import { computeRoutes } from './route.js';
+import { applySchedules } from './schedule.js';
 import { findNearbyTransit } from './transit.js';
 import { buildRegenFeedback, verifyPlan } from './verify.js';
 
@@ -87,10 +88,10 @@ async function assess(query, plan, { progress, stage }) {
   return { ...assessment, score: scoreAssessment(assessment) };
 }
 
-function mergeVerification(verification, geocoding, plan) {
+function mergeVerification(verification, geocoding, plan, extraWarnings = []) {
   const merged = {
     ...verification,
-    warnings: [...new Set([...(verification.warnings || []), ...deterministicWarnings(plan)])].slice(0, 10),
+    warnings: [...new Set([...(verification.warnings || []), ...deterministicWarnings(plan), ...extraWarnings])].slice(0, 10),
   };
   if (geocoding.rejectedSpots.length > 0) {
     merged.passed = false;
@@ -188,14 +189,16 @@ export async function runPlanPipeline(query, { onProgress = () => {} } = {}) {
 
   progress('route', '正在规划每日路线与交通…', 0);
   const ordered = optimizePlanOrder(best.geocoding.plan);
-  const plan = ordered.plan;
   const [routes, transitMarkers] = await time('route_ms', () => Promise.all([
-    computeRoutes(plan, { preference: routePreference(intent, plan), optimizations: ordered.results }),
-    findNearbyTransit(plan),
+    computeRoutes(ordered.plan, { preference: routePreference(intent, ordered.plan), optimizations: ordered.results }),
+    findNearbyTransit(ordered.plan),
   ]));
+  // 按真实路程校验并补全每天的时间线。
+  const scheduled = applySchedules(ordered.plan, routes);
+  const plan = scheduled.plan;
   progress('route', '路线规划完成', 1);
 
-  const verification = mergeVerification(best.verification, best.geocoding, plan);
+  const verification = mergeVerification(best.verification, best.geocoding, plan, scheduled.warnings);
   if (regeneration === 'applied') verification.regenerated = true;
   const stats = best.geocoding.stats;
   log.info('plan.done', {

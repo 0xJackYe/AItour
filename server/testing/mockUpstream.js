@@ -58,6 +58,17 @@ export const PLACES = [
   { id: 'meiji', city: 'tokyo', name: '明治神宫', en: 'Meiji Jingu', lat: 35.6764, lng: 139.6993 },
   { id: 'shibuya', city: 'tokyo', name: '涩谷十字路口', en: 'Shibuya Crossing', lat: 35.6595, lng: 139.7005 },
   { id: 'sengen', city: 'shizuoka', name: '静冈浅间神社', en: 'Shizuoka Sengen Shrine', lat: 34.9846, lng: 138.3725, admin: 'Shizuoka' },
+  // 餐厅（用于午餐 / 晚餐）
+  { id: 'okutan', city: 'kyoto', name: '奥丹清水', en: 'Okutan Kiyomizu', lat: 34.9967, lng: 135.7817, type: 'restaurant', cost: '人均约 3500 日元' },
+  { id: 'pontocho', city: 'kyoto', name: '先斗町', en: 'Pontocho', lat: 35.0055, lng: 135.771, type: 'restaurant', cost: '人均约 5000 日元' },
+  { id: 'owariya', city: 'kyoto', name: '本家尾张屋', en: 'Honke Owariya', lat: 35.0127, lng: 135.7584, type: 'restaurant', cost: '人均约 1500 日元' },
+  { id: 'flore', city: 'paris', name: '花神咖啡馆', en: 'Cafe de Flore', lat: 48.8542, lng: 2.3326, type: 'restaurant', cost: '人均约 25 欧元' },
+  { id: 'angelina', city: 'paris', name: '安吉丽娜茶室', en: 'Angelina Paris', lat: 48.865, lng: 2.3285, type: 'restaurant', cost: '人均约 20 欧元' },
+  { id: 'magots', city: 'paris', name: '双叟咖啡馆', en: 'Les Deux Magots', lat: 48.854, lng: 2.3333, type: 'restaurant', cost: '人均约 30 欧元' },
+  { id: 'imahan', city: 'tokyo', name: '浅草今半', en: 'Asakusa Imahan', lat: 35.7124, lng: 139.7944, type: 'restaurant', cost: '人均约 6000 日元' },
+  { id: 'tsukiji', city: 'tokyo', name: '筑地场外市场', en: 'Tsukiji Outer Market', lat: 35.6654, lng: 139.7707, type: 'restaurant', cost: '人均约 3000 日元' },
+  { id: 'ichiran', city: 'tokyo', name: '一兰拉面 涩谷店', en: 'Ichiran Shibuya', lat: 35.6614, lng: 139.701, type: 'restaurant', cost: '人均约 1200 日元' },
+  { id: 'shizuka', city: 'nara', name: '志津香', en: 'Shizuka Kamameshi', lat: 34.6835, lng: 135.8402, type: 'restaurant', cost: '人均约 1500 日元' },
 ];
 
 const STATIONS = {
@@ -108,13 +119,15 @@ function daysFromMessage(userMessage) {
 }
 
 function placesFor(cityKey, userMessage) {
-  const own = PLACES.filter(place => place.city === cityKey);
+  const own = PLACES.filter(place => place.city === cityKey && place.type !== 'restaurant');
   // 用户点名的一日游城市（如京都→奈良）。
-  const extras = PLACES.filter(place => place.city !== cityKey && place.city !== 'shizuoka' && String(userMessage).includes(place.name));
+  const extras = PLACES.filter(place => place.city !== cityKey && place.city !== 'shizuoka' && place.type !== 'restaurant' && String(userMessage).includes(place.name));
   return [...own, ...extras];
 }
 
-function spotFrom(place, { compact, labelCity }) {
+const RICH_TEXT = '看点集中、步行顺路，适合放慢节奏拍照和感受当地氛围，建议预留充足时间。';
+
+function spotFrom(place, { compact, labelCity, start_time, duration_hours }) {
   const city = CITIES[place.city];
   const spot = {
     name: place.name,
@@ -124,22 +137,42 @@ function spotFrom(place, { compact, labelCity }) {
     type: place.type || 'attraction',
   };
   if (compact) return spot;
-  return { ...spot, duration_hours: 2, description: `${place.name}的简短介绍`, tips: '建议提前出发' };
+  return {
+    ...spot,
+    start_time,
+    duration_hours,
+    cost: place.cost || '门票约 500 日元',
+    description: `${place.name}：${RICH_TEXT}`,
+    tips: '早上人少，开放时间约 9:00-17:00',
+  };
 }
+
+// 每天：景点 09:30 → 景点 11:00 → 午餐 12:30 → 景点 14:30 → 晚餐 18:30
+const DAY_SLOTS = [['09:30', 1.5], ['11:00', 1], ['12:30', 1], ['14:30', 2], ['18:30', 1.5]];
 
 export function buildMockPlan(cityKey, days, { compact = false, userMessage = '', labelOverrides = {} } = {}) {
   const city = CITIES[cityKey];
   const pool = placesFor(cityKey, userMessage);
+  const restaurants = PLACES.filter(place => place.city === cityKey && place.type === 'restaurant');
   const dailyPlans = Array.from({ length: days }, (_, index) => {
     const day = index + 1;
-    const spots = [0, 1, 2].map(offset => pool[(index * 3 + offset) % pool.length]);
+    const sights = [0, 1, 2].map(offset => pool[(index * 3 + offset) % pool.length]);
+    const lunch = restaurants[(index * 2) % restaurants.length];
+    const dinner = restaurants[(index * 2 + 1) % restaurants.length];
+    // 骨架阶段不列餐厅（与真实提示词一致），细化阶段再补充。
+    const ordered = compact ? sights : [sights[0], sights[1], lunch, sights[2], dinner];
     return {
       day,
       city: city.zh,
       country: city.countryZh,
       theme: `${city.zh}第${day}天`,
-      spots: spots.map(place => spotFrom(place, { compact, labelCity: labelOverrides[place.id] || (place.city === 'nara' ? 'nara' : cityKey) })),
-      transport_notes: '地铁与步行结合',
+      spots: ordered.map((place, slot) => spotFrom(place, {
+        compact,
+        labelCity: labelOverrides[place.id] || (place.city === 'nara' ? 'nara' : cityKey),
+        start_time: DAY_SLOTS[slot][0],
+        duration_hours: DAY_SLOTS[slot][1],
+      })),
+      transport_notes: '地铁与步行结合，景点之间多在 20 分钟以内',
     };
   });
   return {
@@ -150,7 +183,14 @@ export function buildMockPlan(cityKey, days, { compact = false, userMessage = ''
     summary: `${city.zh}经典${days}日行程`,
     preferences: { pace: 'moderate', budget: 'moderate', transport: 'public_transit', interests: ['文化'] },
     destinations: [{ city: city.zh, country: city.countryZh, start_day: 1, end_day: days }],
-    accommodations: [{ city: city.zh, country: city.countryZh, area: city.area, reason: '交通便利，餐饮选择多', landmark: city.landmark }],
+    accommodations: [{ city: city.zh, country: city.countryZh, area: city.area, reason: '交通便利，餐饮选择多', landmark: city.landmark, price_hint: '约 600-900 元/晚' }],
+    budget_estimate: {
+      currency: 'CNY',
+      per_person: 1100 * days,
+      excludes: '往返大交通',
+      breakdown: [{ item: '住宿', amount: 500 * days }, { item: '餐饮', amount: 350 * days }, { item: '交通', amount: 100 * days }, { item: '门票', amount: 150 * days }],
+    },
+    booking_tips: [`${pool[0].name}旺季建议提前一周在官网购票`],
     daily_plans: dailyPlans,
     route_reasoning: '按区域安排，减少折返',
     practical_tips: ['提前购买交通卡'],
@@ -162,12 +202,33 @@ function detailFor(userMessage) {
   const start = userMessage.indexOf(marker);
   const skeleton = JSON.parse(userMessage.slice(start + marker.length).trim());
   return {
-    daily_plans: skeleton.daily_plans.map(day => ({
-      day: day.day,
-      theme: day.theme,
-      transport_notes: '乘坐地铁',
-      spots: day.spots.map(spot => ({ name: spot.name, duration_hours: 2, description: `${spot.name}的细化描述`, tips: '细化建议' })),
-    })),
+    daily_plans: skeleton.daily_plans.map((day) => {
+      const cityKey = cityFromText(day.city) || 'kyoto';
+      const restaurants = PLACES.filter(place => place.city === cityKey && place.type === 'restaurant');
+      const meal = (place, time) => ({
+        name: place.name,
+        name_en: `${place.en}, ${CITIES[cityKey].names[1]}`,
+        type: 'restaurant',
+        start_time: time,
+        duration_hours: 1,
+        cost: place.cost,
+        description: `${place.name}：${RICH_TEXT}`,
+        tips: '饭点前到店可减少排队',
+      });
+      const sights = day.spots.map((spot, index) => ({
+        name: spot.name,
+        start_time: ['09:30', '11:00', '14:30', '16:30'][index] || '17:00',
+        duration_hours: 1.5,
+        cost: '门票约 500 日元',
+        description: `${spot.name}的细化描述：${RICH_TEXT}`,
+        tips: '细化建议：开放时间约 9:00-17:00',
+      }));
+      const hasMeals = day.spots.some(spot => spot.type === 'restaurant');
+      const spots = hasMeals || restaurants.length === 0
+        ? sights
+        : [...sights.slice(0, 2), meal(restaurants[day.day % restaurants.length], '12:30'), ...sights.slice(2), meal(restaurants[(day.day + 1) % restaurants.length], '18:30')];
+      return { day: day.day, theme: day.theme, transport_notes: '乘坐地铁，换乘一次', spots };
+    }),
   };
 }
 
@@ -227,6 +288,25 @@ function placeResponse(place, languageCode) {
     ],
     types: ['tourist_attraction'],
     googleMapsUri: `https://maps.google.com/?cid=${place.id}`,
+  };
+}
+
+function cityPlace(key) {
+  const city = CITIES[key];
+  return {
+    id: `city-${key}`,
+    displayName: { text: city.admin, languageCode: 'en' },
+    formattedAddress: `${city.admin}, ${city.countryCode}`,
+    location: { latitude: city.lat, longitude: city.lng },
+    viewport: {
+      low: { latitude: city.viewport[0][0], longitude: city.viewport[0][1] },
+      high: { latitude: city.viewport[1][0], longitude: city.viewport[1][1] },
+    },
+    addressComponents: [
+      { longText: city.admin, shortText: city.admin, types: ['locality', 'political'] },
+      { longText: city.countryZh, shortText: city.countryCode, types: ['country', 'political'] },
+    ],
+    types: ['locality', 'political'],
   };
 }
 
@@ -337,6 +417,10 @@ export function createMockUpstream(options = {}) {
     if (failure) return failure;
     const body = JSON.parse(init.body);
     const query = body.textQuery.toLowerCase();
+    // 城市锚点查询（“京都, 日本”）：第一段恰好是城市名。
+    const firstPart = query.split(',')[0].trim();
+    const cityKey = Object.entries(CITIES).find(([, city]) => city.names.some(name => name.toLowerCase() === firstPart))?.[0];
+    if (cityKey) return json({ places: [cityPlace(cityKey)] });
     const matches = PLACES.filter(place => query.includes(place.en.toLowerCase()) || query.includes(place.name));
     const stations = Object.entries(CITIES)
       .filter(([, city]) => query.includes(city.landmark.toLowerCase()) || query.includes(city.area.toLowerCase()))

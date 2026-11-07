@@ -3,9 +3,9 @@ import { SPOT_TYPE_LABELS, describeLeg, formatDistance, formatDuration, formatHo
 import { dayColor, directionsModeFor, googleMapsDirectionsUrl, legsByOrigin, numberStops } from '../lib/plan.js';
 import Icon from './Icon.jsx';
 
-export default function DaySection({ day, route, preference, onFocusSpot, focusedId }) {
+export default function DaySection({ day, route, preference, onFocusSpot, focusedId, groundingAvailable = true }) {
   const color = dayColor(day.day);
-  const stops = numberStops(day.spots || [], day.day);
+  const stops = numberStops(day.spots || [], day.day, { numberAll: !groundingAvailable });
   const legs = legsByOrigin(route);
   const navigationUrl = googleMapsDirectionsUrl(day.spots || [], { travelMode: directionsModeFor(route, preference) });
   const meta = [
@@ -37,13 +37,19 @@ export default function DaySection({ day, route, preference, onFocusSpot, focuse
           const leg = spot.location_id ? legs.get(spot.location_id) : null;
           const legInfo = describeLeg(leg);
           const typeLabel = SPOT_TYPE_LABELS[spot.type];
-          const facts = [typeLabel && typeLabel !== '景点' ? typeLabel : '', formatHours(spot.duration_hours)].filter(Boolean);
+          const facts = [
+            typeLabel && typeLabel !== '景点' ? typeLabel : '',
+            formatHours(spot.duration_hours) ? `约 ${formatHours(spot.duration_hours)}` : '',
+            spot.cost || '',
+          ].filter(Boolean);
+          const unlocated = groundingAvailable && !spot.coordinates;
           return (
             <Fragment key={key}>
-              <li className={`stop ${spot.coordinates ? '' : 'is-unlocated'} ${focusedId === key ? 'is-focused' : ''}`}>
+              <li className={`stop ${unlocated ? 'is-unlocated' : ''} ${focusedId === key ? 'is-focused' : ''}`}>
                 <span className="stop-marker" aria-hidden="true">{order ?? '·'}</span>
                 <div className="stop-body">
                   <div className="stop-title">
+                    {spot.start_time && <time className="stop-time">{spot.start_time}</time>}
                     {spot.coordinates ? (
                       <button type="button" className="stop-name" onClick={() => onFocusSpot(key)}>
                         {spot.name}
@@ -51,9 +57,9 @@ export default function DaySection({ day, route, preference, onFocusSpot, focuse
                     ) : (
                       <span className="stop-name">{spot.name}</span>
                     )}
-                    {facts.length > 0 && <span className="stop-facts">{facts.join(' · ')}</span>}
-                    {!spot.coordinates && <span className="tag tag-warn" title="Google 地图上未能确认该地点">未定位</span>}
+                    {unlocated && <span className="tag tag-warn" title="Google 地图上未能确认该地点">未定位</span>}
                   </div>
+                  {facts.length > 0 && <p className="stop-facts">{facts.join(' · ')}</p>}
                   {spot.description && <p className="stop-desc">{spot.description}</p>}
                   {spot.tips && (
                     <p className="stop-tip">

@@ -91,6 +91,7 @@ after(async () => {
 
 async function openPage({ viewport = { width: 1440, height: 900 }, isMobile = false, mapsAvailable = true } = {}) {
   const context = await browser.newContext({ viewport, isMobile, hasTouch: isMobile, deviceScaleFactor: 1, locale: 'zh-CN' });
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseUrl });
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', error => errors.push(`pageerror: ${error.message}`));
@@ -133,17 +134,40 @@ test('桌面端：示例 → 实时进度 → 行程、地图、历史、按天�
 
     assert.equal(await page.locator('.plan-head h2').textContent(), '京都3日游');
     assert.equal(await page.locator('article.day').count(), 3);
-    assert.equal(await page.locator('.timeline .stop').count(), 9);
-    assert.ok(await page.locator('.timeline .leg').count() >= 6, '每天的地点之间应有交通段');
-    assert.match(await page.locator('.quality').textContent(), /9\/9 个地点已在 Google 地图上核实/);
-    assert.match(await page.locator('.stay').textContent(), /附近站点/);
+    assert.equal(await page.locator('.timeline .stop').count(), 15);
+    assert.ok(await page.locator('.timeline .leg').count() >= 12, '每天的地点之间应有交通段');
+    assert.match(await page.locator('.quality').textContent(), /15\/15 个地点已在 Google 地图上核实/);
+    // 人能直接照着走：每站有时间、费用；有出发前准备（预算 + 预订）。
+    assert.equal(await page.locator('.stop-time').count(), 15);
+    assert.equal(await page.locator('.stop-time').first().textContent(), '09:30');
+    assert.match(await page.locator('.stop-facts').first().textContent(), /约 1\.5 小时 · 门票约 500 日元/);
+    assert.match(await page.locator('.prep').textContent(), /人均约 ¥3,300（不含往返大交通）/);
+    assert.match(await page.locator('.prep').textContent(), /预订清水寺旺季/);
+    assert.match(await page.locator('.prep').textContent(), /四条河原町约 600-900 元\/晚/);
+    assert.match(await page.locator('.prep').textContent(), /附近：京都河原町站/);
     assert.match(await page.locator('.facts').textContent(), /3 天/);
     assert.ok(await page.locator('.day-head a[href^="https://www.google.com/maps/dir/"]').count() === 3);
     await shot(page, '03-plan-desktop');
 
     // 地图：9 个地点 + 1 个住宿 + 交通站点，3 条路线。
-    assert.ok(await activeMarkers(page) >= 11);
+    assert.ok(await activeMarkers(page) >= 17);
     assert.equal(await activePolylines(page), 3);
+
+    // 复制：剪贴板中是去掉 Markdown 标记、可直接粘贴的完整行程。
+    await page.getByRole('button', { name: '复制行程文字' }).click();
+    await page.getByRole('status').filter({ hasText: '已复制' }).waitFor();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    assert.match(copied, /^【京都3日游】/);
+    assert.match(copied, /【第 3 天 · 京都第3天】/);
+    assert.match(copied, /1\. 09:30 /);
+    assert.ok(!copied.includes('**'));
+
+    // 打印：只保留完整行程（隐藏地图、输入框和操作按钮）。
+    await page.emulateMedia({ media: 'print' });
+    assert.equal(await page.locator('.map-pane').isVisible(), false);
+    assert.equal(await page.locator('.composer-wrap').isVisible(), false);
+    assert.equal(await page.locator('article.day').count(), 3);
+    await page.emulateMedia({ media: 'screen' });
 
     // 按天筛选：只显示第 2 天。
     await page.getByRole('button', { name: '第 2 天' }).click();

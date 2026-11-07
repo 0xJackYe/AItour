@@ -6,6 +6,7 @@ AItour 是一个 AI 旅行规划应用：用户用一句自然语言描述目的
 
 ## 核心能力
 
+- **可以直接照着走的方案**：每个地点都有到达时间、停留时长、费用和具体看点；每天安排午餐和晚餐；换城市的日子写清车次与车程；另有人均预算、需要提前预订的项目和每个过夜城市的住宿建议。支持一键复制为纯文本或打印 / 存为 PDF。
 - **一句话生成行程**：理解“京都三天”“两周”“四天三夜”“半个月自驾”等中英文表达，天数作为硬约束写入提示词并逐日校验。
 - **稳定可靠的生成**：流式调用 + 空闲超时识别卡死；429/5xx/网络错误自动退避重试；缺天只做定向补全；单次输出被截断时自动降级为“骨架 + 分段细化”；8 天以上直接分段生成。
 - **双重校验**：AI 自审与 Google 地点核实并行进行；问题较多时带反馈重生成一次，并在两版之间择优，质量只升不降。
@@ -32,8 +33,8 @@ AItour 是一个 AI 旅行规划应用：用户用一句自然语言描述目的
 ### 1. 准备
 
 - Node.js 20 或更高版本（18 已停止维护，但仍可运行）
-- Google Maps Platform 项目，启用：Maps JavaScript API、Places API (New)、Geocoding API、Routes API
-- DeepSeek API Key（或任意 OpenAI 兼容服务，修改 `DEEPSEEK_BASE_URL` 与 `DEEPSEEK_MODEL` 即可）
+- Google Maps Platform 项目，启用：Maps JavaScript API、Places API (New)、Routes API（服务端所有调用都通过请求头携带 Key，不再需要 Geocoding API）
+- DeepSeek API Key（或任意 OpenAI 兼容服务，修改 `DEEPSEEK_BASE_URL` 与 `DEEPSEEK_MODEL` 即可）。截至 2026 年 11 月，`deepseek-chat` 是 `deepseek-flash`（V4.1-Flash）非推理模式的别名，速度最快；也可以显式指定 `deepseek-flash` 或 `deepseek-v4-pro`
 
 ### 2. 安装依赖
 
@@ -91,8 +92,18 @@ npm test
 npm run build && npm run test:e2e
 ```
 
-- `npm test`：服务端 113 项单元与集成测试（真实 Express 应用 + 模拟 DeepSeek / Google 上游），以及前端 10 项单元测试。
-- `npm run test:e2e`：Playwright 浏览器端到端测试（桌面、移动端、错误 / 澄清 / 取消、地图不可用降级）。需要先安装 Playwright：`npm i -D playwright && npx playwright install chromium`。
+- `npm test`：服务端 126 项单元与集成测试（真实 Express 应用 + 模拟 DeepSeek / Google 上游），以及前端 15 项单元测试。
+- `npm run test:e2e`：Playwright 浏览器端到端测试（桌面、移动端、错误 / 澄清 / 取消、导出与打印、地图不可用降级）。需要先安装 Playwright：`npm i -D playwright && npx playwright install chromium`。
+
+### 行程质量评测
+
+```bash
+npm run eval
+```
+
+用真实的大模型（以及配置了 Key 时的 Google 地图）跑 `eval/cases.json` 中的 12 个典型需求，按“完整、具体、可执行”的规则自动打分，并为每个用例输出一份可读的行程文档。结果写入 `eval/results/`，方法与最新结果见 [docs/EVAL.md](./docs/EVAL.md)。
+
+> 服务器需要通过代理访问外网时（例如在国内调用 Google 地图接口），Node.js 内置的 fetch 默认不读取 `HTTPS_PROXY`。Node 22.21 及以上版本可以在启动命令前加 `NODE_USE_ENV_PROXY=1`。
 - GitHub Actions 在每次推送和 PR 时自动运行以上全部测试。
 
 ## 目录结构

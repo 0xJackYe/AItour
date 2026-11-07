@@ -1,4 +1,5 @@
-// Google Maps Platform 服务端客户端：Places (New)、Geocoding、Routes。
+// Google Maps Platform 服务端客户端：Places (New)、Routes。
+// 所有请求都通过 X-Goog-Api-Key 请求头携带 Key，不会出现在 URL 与访问日志中。
 //
 // 可靠性设计：
 //  - 每次调用有超时；429 / 5xx / OVER_QUERY_LIMIT / 网络错误自动退避重试；
@@ -15,7 +16,6 @@ import { currentSignal, recordStat } from '../lib/context.js';
 import { log } from '../lib/log.js';
 
 export const PLACES_BASE = 'https://places.googleapis.com/v1';
-export const GEOCODING_URL = 'https://maps.googleapis.com/maps/api/geocode/json';
 export const ROUTES_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes';
 
 let cache = null;
@@ -107,28 +107,6 @@ async function cached(key, producer) {
   throwIfAborted(currentSignal());
   recordStat('google_requests');
   return getCache().wrap(key, producer, { ttlMs: getConfig().google.cacheTtlMs });
-}
-
-function validateGeocodingStatus(data) {
-  if (data.status === 'OK' || data.status === 'ZERO_RESULTS') return;
-  const retryable = data.status === 'OVER_QUERY_LIMIT' || data.status === 'UNKNOWN_ERROR';
-  throw new AppError(
-    data.status === 'REQUEST_DENIED' ? 'MAPS_REQUEST_DENIED' : 'MAPS_ERROR',
-    data.error_message || `Google Geocoding 返回 ${data.status}`,
-    { status: 502, retryable },
-  );
-}
-
-export async function geocodeAddress(address, languageCode = 'zh-CN') {
-  const key = getGoogleApiKey();
-  return cached(`geocode|${languageCode}|${address}`, async () => {
-    const url = new URL(GEOCODING_URL);
-    url.searchParams.set('address', address);
-    url.searchParams.set('language', languageCode);
-    url.searchParams.set('key', key);
-    const data = await googleJsonRequest(url, { validate: validateGeocodingStatus });
-    return data.status === 'ZERO_RESULTS' ? [] : data.results || [];
-  });
 }
 
 const PLACE_FIELDS = [

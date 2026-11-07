@@ -10,7 +10,8 @@
     "start": "npm --prefix server start",
     "test": "npm --prefix server test && npm --prefix client test",
     "test:e2e": "node e2e/smoke.mjs",
-    "install:all": "npm install && npm --prefix server install && npm --prefix client install"
+    "install:all": "npm install && npm --prefix server install && npm --prefix client install",
+    "eval": "node eval/run.mjs"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

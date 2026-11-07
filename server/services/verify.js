@@ -43,7 +43,7 @@ export async function verifyPlan(userQuery, plan) {
   const userMessage = `【用户原始需求】\n${userQuery}\n\n【已生成的旅行计划】\n${JSON.stringify(planOutline(plan))}`;
   try {
     const parsed = await requestJson(VERIFY_SYSTEM_PROMPT, userMessage, {
-      maxTokens: 2048,
+      maxTokens: 6144,
       temperature: 0.1,
       purpose: 'verify',
       retries: 1,

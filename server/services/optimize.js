@@ -63,7 +63,9 @@ export function optimizeDayOrder(spots, { start = null } = {}) {
 
   const saved = original - bestLength;
   if (saved >= MIN_SAVING_KM && original > 0 && saved / original >= MIN_SAVING_RATIO) {
-    return { spots: best, optimized: true, savedKm: Math.round(saved * 10) / 10 };
+    // 时间跟着“时段”走而不是跟着地点走：午餐仍在 12:00，只是上午先去更近的景点。
+    const reordered = best.map((spot, index) => (list[index].start_time ? { ...spot, start_time: list[index].start_time } : spot));
+    return { spots: reordered, optimized: true, savedKm: Math.round(saved * 10) / 10 };
   }
   return unchanged;
 }

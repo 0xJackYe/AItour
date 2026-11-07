@@ -22,14 +22,23 @@ export function spotKey(day, spot, index) {
   return spot.location_id || `day:${day}:spot:${index}`;
 }
 
-/** 与地图标记一致的编号与键：只有已定位的地点获得序号。 */
-export function numberStops(spots = [], day = 0) {
+/**
+ * 与地图标记一致的编号与键：只有已定位的地点获得序号。
+ * 地图校验未启用时没有地图标记，按顺序给所有地点编号。
+ */
+export function numberStops(spots = [], day = 0, { numberAll = false } = {}) {
   let order = 0;
   return spots.map((spot, index) => ({
     spot,
     key: spotKey(day, spot, index),
-    order: spot.coordinates ? ++order : null,
+    order: numberAll || spot.coordinates ? ++order : null,
   }));
+}
+
+/** 本次结果是否做过 Google 地图校验（未配置 Key 时为 false）。 */
+export function isGroundingAvailable(result) {
+  if (result?.quality?.grounding_available === false) return false;
+  return !(result?.geocodingWarnings || []).some(item => item.code === 'maps_unavailable');
 }
 
 /** 以出发地点为键的交通段映射；旧数据没有 legs 时返回空映射。 */
@@ -78,7 +87,8 @@ export function summarizeQuality(result) {
 
   const issueCount = groups.reduce((sum, group) => sum + group.items.length, 0);
   const parts = [];
-  if (spots.length) parts.push(`${located}/${spots.length} 个地点已在 Google 地图上核实`);
+  if (!isGroundingAvailable(result)) parts.push('地图校验未启用');
+  else if (spots.length) parts.push(`${located}/${spots.length} 个地点已在 Google 地图上核实`);
   if (removed.length) parts.push(`移除 ${removed.length} 个外地同名地点`);
   if (verification.regenerated) parts.push('已自动修正');
   return {

@@ -531,6 +531,25 @@ a {
   padding-top: 24px;
 }
 
+.plan-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.plan-actions {
+  display: flex;
+  flex-shrink: 0;
+  margin: -4px -8px 0 0;
+}
+
+.plan-notice {
+  margin-top: 6px;
+  color: var(--ok);
+  font-size: 12.5px;
+}
+
 .plan-head h2 {
   font-size: 22px;
   line-height: 30px;
@@ -873,7 +892,16 @@ button.stop-name:hover {
   text-underline-offset: 3px;
 }
 
+.stop-time {
+  min-width: 42px;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .stop-facts {
+  margin-top: 1px;
   color: var(--text-3);
   font-size: 12.5px;
 }
@@ -952,6 +980,94 @@ button.stop-name:hover {
 
 .more li + li {
   margin-top: 4px;
+}
+
+.stay-price {
+  margin-left: 4px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.prep {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.prep h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.prep-rows {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  row-gap: 10px;
+  margin: 10px 0 0;
+}
+
+.prep-rows dt {
+  padding-top: 1px;
+  color: var(--text-3);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.prep-rows dd {
+  margin: 0;
+  font-size: 13px;
+}
+
+.prep-rows strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.prep .stay-item {
+  margin-top: 0;
+}
+
+.prep .stay-item + .stay-item {
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.prep .stay-area {
+  font-size: 14px;
+}
+
+.prep-note {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.prep-breakdown {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.prep-label {
+  margin-top: 10px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.prep-list {
+  padding-left: 16px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.prep-list li + li {
+  margin-top: 2px;
 }
 
 .disclaimer {
@@ -1213,6 +1329,59 @@ button.stop-name:hover {
     position: static;
     margin: 16px -16px 0;
     padding: 6px 16px;
+  }
+}
+
+/* 打印 / 存为 PDF：只保留完整行程。 */
+@media print {
+  body {
+    overflow: visible;
+  }
+
+  .app {
+    display: block;
+    height: auto;
+  }
+
+  .topbar,
+  .map-pane,
+  .composer-wrap,
+  .hero,
+  .day-filter,
+  .plan-actions,
+  .plan-notice,
+  .icon-btn,
+  .scrim {
+    display: none !important;
+  }
+
+  .panel {
+    overflow: visible;
+    padding: 0;
+    border: 0;
+  }
+
+  .plan {
+    padding-top: 0;
+  }
+
+  .day {
+    break-inside: avoid-page;
+  }
+
+  .stop,
+  .leg {
+    break-inside: avoid;
+  }
+
+  .quality > summary .chevron,
+  .more > summary .chevron {
+    display: none;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 }
 

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "kyoto-3d",
+    "query": "我想去京都玩三天，想去清水寺、伏见稻荷、岚山，住在地铁方便的地方，行程别太赶",
+    "expect": { "days": 3, "pace": "relaxed", "must": [["清水寺", "Kiyomizu"], ["伏见稻荷", "伏見稲荷", "Fushimi"], ["岚山", "嵐山", "Arashiyama"]] }
+  },
+  {
+    "id": "tokyo-family-5d",
+    "query": "东京五日游，带小孩，想去迪士尼、浅草寺、秋叶原、台场，预算中等",
+    "expect": { "days": 5, "must": [["迪士尼", "Disney"], ["浅草寺", "Senso"], ["秋叶原", "Akihabara"], ["台场", "Odaiba"]] }
+  },
+  {
+    "id": "paris-4d",
+    "query": "巴黎四天三夜，想看埃菲尔铁塔、卢浮宫、凡尔赛宫，喜欢咖啡馆和甜品",
+    "expect": { "days": 4, "must": [["埃菲尔铁塔", "Eiffel"], ["卢浮宫", "Louvre"], ["凡尔赛", "Versailles"]], "food": true }
+  },
+  {
+    "id": "chengdu-food-3d",
+    "query": "成都三天美食之旅，想吃火锅、串串，顺便看看大熊猫和武侯祠",
+    "expect": { "days": 3, "must": [["大熊猫", "Panda"], ["武侯祠", "Wuhou"]], "food": true }
+  },
+  {
+    "id": "japan-2w",
+    "query": "日本两周深度游，东京、京都、大阪、奈良，节奏轻松，第一次去日本",
+    "expect": { "days": 14, "pace": "relaxed", "cities": ["东京", "京都", "大阪", "奈良"] }
+  },
+  {
+    "id": "europe-28d",
+    "query": "我想去塞尔维亚，波黑，克罗地亚，意大利，瑞士，法国。帮我设计一个完整的旅游路线，总时长28天，预算中等，旅行节奏轻松，塞尔维亚开始，法国结束，欧洲内部交通用火车",
+    "expect": { "days": 28, "pace": "relaxed", "countries": ["塞尔维亚", ["波黑", "波斯尼亚"], "克罗地亚", "意大利", "瑞士", "法国"], "first_country": "塞尔维亚", "last_country": "法国" }
+  },
+  {
+    "id": "xinjiang-drive-10d",
+    "query": "新疆北疆自驾十天，乌鲁木齐出发，想去喀纳斯、禾木、赛里木湖、独库公路",
+    "expect": { "days": 10, "transport": "drive", "must": [["喀纳斯", "Kanas"], ["禾木", "Hemu"], ["赛里木湖", "Sayram"], ["独库", "Duku"]] }
+  },
+  {
+    "id": "hangzhou-weekend-elderly",
+    "query": "周末带爸妈去杭州，老人腿脚不太好，想看西湖和灵隐寺，不要太累",
+    "expect": { "days": 2, "pace": "relaxed", "must": [["西湖", "West Lake"], ["灵隐寺", "Lingyin"]] }
+  },
+  {
+    "id": "newyork-en-5d",
+    "query": "5 days in New York with my partner, we love museums, Broadway and good food, mid budget",
+    "expect": { "days": 5, "must": [["百老汇", "Broadway"]], "food": true }
+  },
+  {
+    "id": "shanghai-citywalk-1d",
+    "query": "上海一日 citywalk，想逛武康路、外滩、豫园",
+    "expect": { "days": 1, "transport": "walk", "must": [["武康路", "Wukang"], ["外滩", "Bund"], ["豫园", "Yuyuan", "Yu Garden"]] }
+  },
+  {
+    "id": "bangkok-budget-4d",
+    "query": "曼谷穷游四天，预算有限，想去大皇宫、郑王庙、恰图恰周末市场",
+    "expect": { "days": 4, "budget": "budget", "must": [["大皇宫", "Grand Palace"], ["郑王庙", "Wat Arun"], ["恰图恰", "乍都乍", "札都甲", "Chatuchak"]] }
+  },
+  {
+    "id": "vague",
+    "query": "想出去玩几天，有什么推荐",
+    "expect": { "clarification": true }
+  }
+]

@@ -32,3 +32,6 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Evaluation outputs (raw model responses)
+eval/results/

@@ -59,6 +59,35 @@ function stringList(value, { max = 10, length = 80 } = {}) {
   return value.filter(item => typeof item === 'string').map(item => text(item, length)).filter(Boolean).slice(0, max);
 }
 
+/** “9:00”“09：30”“9.30”“09:00-11:00” → “09:00”；无法识别返回 null。 */
+export function normalizeClock(value) {
+  const match = /^(\d{1,2})[:：.](\d{2})/.exec(text(value, 20));
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+/** 预算估算：总额以分项之和为准，保证前后一致。 */
+export function normalizeBudget(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const breakdown = (Array.isArray(raw.breakdown) ? raw.breakdown : [])
+    .map(item => ({ item: text(item?.item, 12), amount: Math.round(Number(item?.amount)) }))
+    .filter(item => item.item && Number.isFinite(item.amount) && item.amount >= 0)
+    .slice(0, 8);
+  const sum = breakdown.reduce((total, item) => total + item.amount, 0);
+  const declared = Math.round(Number(raw.per_person));
+  const perPerson = sum > 0 ? sum : (Number.isFinite(declared) && declared > 0 ? declared : null);
+  if (!perPerson) return null;
+  return {
+    currency: (text(raw.currency, 8) || 'CNY').toUpperCase(),
+    per_person: perPerson,
+    excludes: text(raw.excludes, 40),
+    breakdown,
+  };
+}
+
 export function isMultiCityLabel(value) {
   return MULTI_CITY_LABELS.has(text(value, 40).toLowerCase());
 }
@@ -69,18 +98,28 @@ export function singleCountry(value) {
   return /[、,，/]/.test(country) ? '' : country;
 }
 
+// 模型偶尔会用占位符代替具体地点（“?”“待定”“午餐”），这种地点无法使用，直接丢弃。
+const PLACEHOLDER_NAMES = /^(?:待定|未定|暂定|不详|无|tbd|n\/?a|unknown|餐厅|饭店|当地餐厅|附近餐厅|午餐|晚餐|早餐|午饭|晚饭|lunch|dinner|breakfast|restaurant|local restaurant)$/i;
+
+export function isPlaceholderName(value) {
+  const name = text(value, 80);
+  return !name || !/[\p{L}\p{N}]/u.test(name) || PLACEHOLDER_NAMES.test(name);
+}
+
 export function normalizeSpot(raw, { city = '', country = '' } = {}) {
   if (!raw || typeof raw !== 'object') return null;
   const name = text(raw.name, 60) || text(raw.name_en, 80);
-  if (!name) return null;
+  if (isPlaceholderName(name)) return null;
   return {
     name,
     name_en: text(raw.name_en, 100),
     city: text(raw.city, 40) || city,
     country: text(raw.country, 40) || country,
     type: enumValue(raw.type, TYPE_ALIASES, 'attraction'),
+    start_time: normalizeClock(raw.start_time),
     duration_hours: durationHours(raw.duration_hours),
-    description: text(raw.description, 160),
+    cost: text(raw.cost, 40),
+    description: text(raw.description, 200),
     tips: text(raw.tips, 120),
   };
 }
@@ -141,6 +180,7 @@ function normalizeAccommodation(item, fallback = {}) {
     area: area || landmark,
     reason: text(item.reason, 120),
     landmark,
+    price_hint: text(item.price_hint, 30),
   };
 }
 
@@ -202,7 +242,9 @@ export function normalizePlan(plan, { expectedDays = null } = {}) {
     accommodations,
     accommodation: accommodations[0] || null,
     daily_plans: dailyPlans,
-    route_reasoning: text(plan.route_reasoning, 240),
+    budget_estimate: normalizeBudget(plan.budget_estimate),
+    booking_tips: stringList(plan.booking_tips, { max: 5, length: 80 }),
+    route_reasoning: text(plan.route_reasoning, 300),
     practical_tips: stringList(plan.practical_tips, { max: 6, length: 80 }),
   };
 }
@@ -264,6 +306,12 @@ export function deterministicWarnings(plan) {
     if (main > limit) warnings.push(`Day ${day.day} 安排了 ${main} 个主要地点，节奏可能偏紧`);
     const hours = (day.spots || []).reduce((sum, spot) => sum + (spot.duration_hours || 0), 0);
     if (hours > 11) warnings.push(`Day ${day.day} 建议停留时间合计约 ${hours} 小时，可能过满`);
+  }
+  const stayCities = new Set((plan?.accommodations || []).map(item => item.city));
+  for (const destination of plan?.destinations || []) {
+    // 只对住两晚以上（跨天）的城市要求住宿建议；中途只停留一天的城市常是一日游。
+    const staysOvernight = destination.end_day > destination.start_day;
+    if (staysOvernight && !stayCities.has(destination.city)) warnings.push(`${destination.city}需要过夜，但没有住宿建议`);
   }
   const seen = new Map();
   for (const day of plan?.daily_plans || []) {

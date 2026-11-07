@@ -95,7 +95,10 @@ test('JSON 模式：京都三天（前端示例）完整生成、全部定位、
     assert.ok(allSpots(result).every(spot => spot.coordinates && spot.location_status === 'verified'));
     assert.equal(result.quality.verified_spots, result.quality.total_spots);
     assert.equal(result.routes.length, 3);
-    assert.ok(result.routes.every(route => route.legs.length === 2 && route.distance_meters > 0));
+    assert.ok(result.routes.every(route => route.legs.length === route.points.length - 1 && route.legs.length >= 4 && route.distance_meters > 0));
+    assert.ok(allSpots(result).every(spot => /^\d{2}:\d{2}$/.test(spot.start_time)), '每个地点都有时间');
+    assert.ok(result.plan.daily_plans.every(day => day.spots.filter(spot => spot.type === 'restaurant').length === 2), '每天有午餐和晚餐');
+    assert.equal(result.plan.budget_estimate.currency, 'CNY');
     assert.ok(result.transit_markers.length > 0);
     assert.equal(result.verification.passed, true);
     assert.equal(result.meta.request_id, response.headers.get('x-request-id'));
@@ -144,7 +147,9 @@ test('地图校验发现大量无法定位的地点时，带反馈重生成并�
       planHook: (plan, { call }) => {
         if (call > 0) return plan;
         plan.daily_plans.forEach((day) => {
-          day.spots.push({ name: `虚构景点${day.day}`, name_en: `Imaginary Spot ${day.day}, Kyoto`, city: '京都', country: '日本', type: 'attraction' });
+          for (const suffix of ['A', 'B']) {
+            day.spots.push({ name: `虚构景点${day.day}${suffix}`, name_en: `Imaginary Spot ${day.day}${suffix}, Kyoto`, city: '京都', country: '日本', type: 'attraction', start_time: '20:00', duration_hours: 1, description: '虚构地点的介绍文字足够长，用来模拟模型编造的不存在地点。' });
+          }
         });
         return plan;
       },

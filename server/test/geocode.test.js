@@ -181,25 +181,27 @@ test('端到端落地：找不到的地点保留为“未定位”而不是删�
 }));
 
 test('Google 短暂 503 会自动重试，不影响结果', withUpstream({ googleFailures: 2 }, async () => {
-  const result = await geocodeAllSpots(normalizePlan(buildMockPlan('kyoto', 1), { expectedDays: 1 }));
-  assert.equal(result.stats.verified, 3);
+  const plan = normalizePlan(buildMockPlan('kyoto', 1), { expectedDays: 1 });
+  const result = await geocodeAllSpots(plan);
+  assert.equal(result.stats.verified, plan.daily_plans[0].spots.length);
 }));
 
 test('相同城市与地点的查询命中缓存', withUpstream({}, async (upstream) => {
   const plan = normalizePlan(buildMockPlan('kyoto', 1), { expectedDays: 1 });
   await geocodeAllSpots(plan);
-  const first = { geocode: upstream.calls.geocode, places: upstream.calls.places };
+  const first = upstream.calls.places;
   await geocodeAllSpots(plan);
-  assert.equal(upstream.calls.geocode, first.geocode);
-  assert.equal(upstream.calls.places, first.places);
+  assert.ok(first > 0);
+  assert.equal(upstream.calls.places, first, '第二次全部命中缓存');
 }));
 
 test('未配置 Google Key 时降级：保留行程、不定位、给出一条提示', async () => {
   const env = { ...process.env };
   delete process.env.GOOGLE_MAPS_API_KEY;
   try {
-    const result = await geocodeAllSpots(normalizePlan(buildMockPlan('kyoto', 1), { expectedDays: 1 }));
-    assert.equal(result.plan.daily_plans[0].spots.length, 3);
+    const plan = normalizePlan(buildMockPlan('kyoto', 1), { expectedDays: 1 });
+    const result = await geocodeAllSpots(plan);
+    assert.equal(result.plan.daily_plans[0].spots.length, plan.daily_plans[0].spots.length);
     assert.ok(result.plan.daily_plans[0].spots.every(spot => spot.coordinates === null));
     assert.deepEqual(result.warnings.map(item => item.code), ['maps_unavailable']);
   } finally {

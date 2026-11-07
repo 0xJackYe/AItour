@@ -30,6 +30,28 @@ const VEHICLE_LABELS = {
   FUNICULAR: '缆车',
 };
 
+const CURRENCY_SYMBOLS = { CNY: '¥', RMB: '¥', USD: '$', EUR: '€', GBP: '£' };
+
+export function formatMoney(amount, currency = 'CNY') {
+  if (!Number.isFinite(amount)) return '';
+  const symbol = CURRENCY_SYMBOLS[String(currency).toUpperCase()];
+  const value = Math.round(amount).toLocaleString('en-US');
+  return symbol ? `${symbol}${value}` : `${value} ${currency}`;
+}
+
+/** 预算估算 → { total: '人均约 ¥4,500', note: '不含往返大交通', items: ['住宿 ¥1,800', ...] } */
+export function describeBudget(budget) {
+  if (!budget || !Number.isFinite(budget.per_person) || budget.per_person <= 0) return null;
+  const excludes = String(budget.excludes || '').replace(/^不含/, '').trim();
+  return {
+    total: `人均约 ${formatMoney(budget.per_person, budget.currency)}`,
+    note: excludes ? `不含${excludes}` : '',
+    items: (budget.breakdown || [])
+      .filter(item => item?.item && Number.isFinite(item.amount))
+      .map(item => `${item.item} ${formatMoney(item.amount, budget.currency)}`),
+  };
+}
+
 export function formatDistance(meters) {
   if (!Number.isFinite(meters) || meters <= 0) return '';
   if (meters < 1000) return `${Math.round(meters / 10) * 10} m`;

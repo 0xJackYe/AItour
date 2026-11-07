@@ -108,3 +108,43 @@ test('只输出白名单字段：模型生成的额外字段不会进入响应',
   assert.equal(plan.daily_plans[0].spots[0].html, undefined);
   assert.equal(plan.accommodations[0].extra, undefined);
 });
+
+test('时间、费用、预算与预订提醒的规范化', async () => {
+  const { normalizeClock, normalizeBudget } = await import('../services/planSchema.js');
+  assert.deepEqual(['9:00', '09：30', '9.05', '09:00-11:00', '25:00', 'abc'].map(normalizeClock), ['09:00', '09:30', '09:05', '09:00', null, null]);
+  const budget = normalizeBudget({ per_person: 999, breakdown: [{ item: '住宿', amount: 1800 }, { item: '餐饮', amount: '1200' }, { item: '', amount: 5 }] });
+  assert.equal(budget.per_person, 3000, '总额以分项之和为准');
+  assert.equal(budget.currency, 'CNY');
+  assert.equal(normalizeBudget({ per_person: 'abc' }), null);
+
+  const plan = normalizePlan({
+    city: '京都',
+    booking_tips: ['岚山小火车提前一个月购票', 42],
+    daily_plans: [{ day: 1, spots: [{ name: '清水寺', start_time: '9:00', cost: '门票约 400 日元' }] }],
+  });
+  assert.equal(plan.daily_plans[0].spots[0].start_time, '09:00');
+  assert.equal(plan.daily_plans[0].spots[0].cost, '门票约 400 日元');
+  assert.deepEqual(plan.booking_tips, ['岚山小火车提前一个月购票']);
+});
+
+test('占位名称（“?”“待定”“午餐”）的地点被丢弃', () => {
+  const plan = normalizePlan({ city: '京都', daily_plans: [{ day: 1, spots: [{ name: '?' }, { name: '待定' }, { name: '午餐' }, { name: '奥丹清水' }] }] });
+  assert.deepEqual(plan.daily_plans[0].spots.map(spot => spot.name), ['奥丹清水']);
+});
+
+test('需要过夜却没有住宿建议的城市会被提示', () => {
+  const plan = normalizePlan({
+    city: '多城市',
+    days: 5,
+    destinations: [
+      { city: '东京', country: '日本', start_day: 1, end_day: 2 },
+      { city: '奈良', country: '日本', start_day: 3, end_day: 4 },
+      { city: '大阪', country: '日本', start_day: 5, end_day: 5 },
+    ],
+    accommodations: [{ city: '东京', area: '新宿' }],
+    daily_plans: [],
+  });
+  const warnings = deterministicWarnings(plan);
+  assert.ok(warnings.some(item => item.startsWith('奈良')));
+  assert.ok(!warnings.some(item => item.startsWith('大阪')), '最后一天当天离开的城市不需要住宿');
+});

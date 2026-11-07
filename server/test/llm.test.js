@@ -37,6 +37,17 @@ function sse(chunks, signal) {
   }), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 
+const RICH = '这里有足够具体的介绍：看点、体验和顺路安排都写清楚了，游客可以直接照着走。';
+
+function richSpots(day) {
+  return [
+    { name: `景点${day}`, name_en: `Spot ${day}, Tokyo`, type: 'attraction', start_time: '09:30', duration_hours: 2, description: RICH },
+    { name: `午餐${day}号店`, name_en: `Lunch Place ${day}, Tokyo`, type: 'restaurant', start_time: '12:00', duration_hours: 1, description: RICH },
+    { name: `景点${day}B`, name_en: `Spot ${day}B, Tokyo`, type: 'attraction', start_time: '14:00', duration_hours: 2, description: RICH },
+    { name: `晚餐${day}号店`, name_en: `Dinner Place ${day}, Tokyo`, type: 'restaurant', start_time: '18:30', duration_hours: 1.5, description: RICH },
+  ];
+}
+
 function tokyoPlan(days, { missing = [] } = {}) {
   return {
     status: 'success',
@@ -45,7 +56,7 @@ function tokyoPlan(days, { missing = [] } = {}) {
       destinations: [{ city: '东京', country: '日本', start_day: 1, end_day: days }],
       daily_plans: Array.from({ length: days }, (_, i) => i + 1)
         .filter(day => !missing.includes(day))
-        .map(day => ({ day, city: '东京', country: '日本', spots: [{ name: `景点${day}`, name_en: `Spot ${day}, Tokyo` }] })),
+        .map(day => ({ day, city: '东京', country: '日本', spots: richSpots(day), transport_notes: '地铁与步行结合' })),
     },
   };
 }
@@ -143,7 +154,12 @@ test('长行程按段细化后仍完整保留 28 天和逐日城市上下文', a
     return completion({
       daily_plans: chunk.daily_plans.map(day => ({
         ...day,
-        spots: day.spots.map(spot => ({ ...spot, duration_hours: 2, description: '经过细化的描述', tips: '经过细化的建议' })),
+        spots: [
+          { ...day.spots[0], start_time: '09:00', duration_hours: 2, description: `经过细化的描述：${RICH}`, tips: '经过细化的建议' },
+          { name: `${day.city}午餐${day.day}`, name_en: `Lunch ${day.day}`, type: 'restaurant', start_time: '12:00', duration_hours: 1, description: RICH },
+          { ...day.spots[1], start_time: '14:00', duration_hours: 2, description: `经过细化的描述：${RICH}`, tips: '经过细化的建议' },
+          { name: `${day.city}晚餐${day.day}`, name_en: `Dinner ${day.day}`, type: 'restaurant', start_time: '18:30', duration_hours: 1.5, description: RICH },
+        ],
       })),
     });
   }, async () => {
@@ -153,7 +169,9 @@ test('长行程按段细化后仍完整保留 28 天和逐日城市上下文', a
     assert.deepEqual(result.plan.daily_plans.map(day => day.day), Array.from({ length: 28 }, (_, i) => i + 1));
     assert.ok(result.plan.daily_plans.every(day => day.city && day.country));
     assert.ok(result.plan.daily_plans.every(day => day.spots.every(spot => spot.description)));
-    assert.equal(callCount, 1 + Math.ceil(28 / DETAIL_CHUNK_SIZE), '一次骨架请求 + 每段一次细化请求');
+    assert.ok(result.plan.daily_plans.every(day => day.spots.filter(spot => spot.type === 'restaurant').length === 2), '细化阶段补充的午餐和晚餐被合并进来');
+    assert.deepEqual(result.plan.daily_plans[0].spots.map(spot => spot.start_time), ['09:00', '12:00', '14:00', '18:30']);
+    assert.equal(callCount, 1 + Math.ceil(28 / DETAIL_CHUNK_SIZE), '一次骨架请求 + 每段一次细化请求，细节达标时不再额外补充');
   });
 });
 
@@ -170,7 +188,7 @@ test('单次输出被 length 截断时自动降级为分段生成', async () => 
     const result = await callLLM('东京3天旅行');
     assert.equal(result.strategy, 'chunked-fallback');
     assert.equal(result.plan.daily_plans.length, 3);
-    assert.deepEqual(purposes, ['plan', 'outline', 'detail']);
+    assert.deepEqual(purposes, ['plan', 'outline', 'detail'], '骨架本身已完整，细化为空时保留骨架');
   });
 });
 
@@ -182,7 +200,7 @@ test('缺失的天只做定向补全，而不是整份重新生成', async () =>
     purposes.push(purpose);
     if (purpose === 'plan') return completion(tokyoPlan(3, { missing: [2] }));
     assert.match(request.messages[1].content, /【需要补全的天】\nDay 2/);
-    return completion({ daily_plans: [{ day: 2, spots: [{ name: '补全景点', name_en: 'Filled, Tokyo' }] }] });
+    return completion({ daily_plans: [{ day: 2, transport_notes: '地铁与步行结合', spots: [{ ...richSpots(2)[0], name: '补全景点', name_en: 'Filled, Tokyo' }, ...richSpots(2).slice(1)] }] });
   }, async () => {
     const result = await callLLM('东京三天');
     assert.deepEqual(result.plan.daily_plans.map(day => day.day), [1, 2, 3]);
@@ -318,4 +336,79 @@ test('调用方取消时立即中止且不重试', async () => {
     );
     assert.equal(calls, 1);
   });
+});
+
+test('质量闸门：介绍过短、缺餐、缺时间都会被识别；换城市的日子和最后一天放宽用餐要求', async () => {
+  const { dayDetailGaps } = await import('../services/llm.js');
+  const full = { spots: richSpots(1), transport_notes: '地铁与步行结合' };
+  assert.deepEqual(dayDetailGaps(full), []);
+  const thin = { spots: richSpots(1).map(spot => ({ ...spot, description: '太短' })) };
+  assert.ok(dayDetailGaps(thin).some(gap => gap.includes('简短')));
+  const noDinner = { spots: richSpots(1).slice(0, 3), transport_notes: '地铁与步行结合' };
+  assert.deepEqual(dayDetailGaps(noDinner), ['缺少晚餐']);
+  assert.deepEqual(dayDetailGaps(noDinner, { isLastDay: true }), []);
+  const travel = { spots: [{ name: '东京站', type: 'transport', start_time: '08:00', description: RICH }, ...richSpots(1).slice(0, 3)], transport_notes: '新干线约 2 小时' };
+  assert.deepEqual(dayDetailGaps(travel), []);
+  const untimed = { spots: richSpots(1).map(({ start_time, ...spot }) => spot) };
+  assert.ok(dayDetailGaps(untimed).includes('缺少时间安排'));
+});
+
+test('细节不足的天会被定向补充，并且只在更好时采用', async () => {
+  const purposes = [];
+  const thinDay = { day: 2, city: '东京', country: '日本', spots: [{ name: '景点2', name_en: 'Spot 2, Tokyo', type: 'attraction', start_time: '10:00', duration_hours: 2, description: '短' }] };
+  await withFetch(async (_url, options) => {
+    const request = JSON.parse(options.body);
+    const purpose = llmPurpose(request.messages[0].content);
+    purposes.push(purpose);
+    if (purpose === 'plan') {
+      const plan = tokyoPlan(3);
+      plan.plan.daily_plans[1] = thinDay;
+      return completion(plan);
+    }
+    assert.match(request.messages[1].content, /【需要改进的地方】\nDay 2：/);
+    return completion({ daily_plans: [{ day: 2, transport_notes: '地铁与步行结合', spots: richSpots(2).map((spot, index) => (index === 0 ? { ...spot, name: '景点2（Spot 2）' } : spot)) }] });
+  }, async () => {
+    const result = await callLLM('东京三天');
+    const day2 = result.plan.daily_plans[1];
+    assert.equal(day2.spots[0].name, '景点2', '保留骨架中的原名');
+    assert.equal(day2.spots.filter(spot => spot.type === 'restaurant').length, 2);
+    assert.ok(day2.spots.every(spot => spot.description.length >= 25));
+    assert.deepEqual(purposes, ['plan', 'detail']);
+  });
+});
+
+test('定向补充的结果更差时保留原来的版本', async () => {
+  const thinDay = { day: 1, city: '东京', country: '日本', spots: [{ name: '景点1', type: 'attraction', start_time: '10:00', duration_hours: 2, description: '短' }] };
+  await withFetch(async (_url, options) => {
+    const purpose = llmPurpose(JSON.parse(options.body).messages[0].content);
+    if (purpose === 'plan') return completion({ status: 'success', plan: { city: '东京', country: '日本', days: 1, daily_plans: [thinDay] } });
+    return completion({ daily_plans: [{ day: 1, spots: [{ name: '景点1' }] }] });
+  }, async () => {
+    const result = await callLLM('东京一日游');
+    assert.equal(result.plan.daily_plans[0].spots[0].start_time, '10:00');
+    assert.equal(result.plan.daily_plans[0].spots[0].description, '短');
+  });
+});
+
+test('合并细化结果：容忍名称改写，补充的餐厅按时间插入，占位名称被丢弃', async () => {
+  const { mergeDetailedDay } = await import('../services/llm.js');
+  const outline = { day: 1, city: '京都', country: '日本', spots: [
+    { name: '清水寺', name_en: 'Kiyomizu-dera, Kyoto', type: 'attraction' },
+    { name: '祇园', name_en: 'Gion, Kyoto', type: 'attraction' },
+  ] };
+  const merged = mergeDetailedDay(outline, { theme: '东山', spots: [
+    { name: '清水寺（Kiyomizu-dera）', start_time: '09:00', duration_hours: 2, description: RICH },
+    { name: '奥丹清水', name_en: 'Okutan Kiyomizu, Kyoto', type: 'restaurant', start_time: '12:00', description: RICH },
+    { name: '?', type: 'restaurant', start_time: '13:00' },
+    { name: '祇园', start_time: '15:00', duration_hours: 1.5, description: RICH },
+  ] });
+  assert.deepEqual(merged.spots.map(spot => spot.name), ['清水寺', '奥丹清水', '祇园']);
+  assert.equal(merged.spots[1].city, '京都');
+  assert.equal(merged.spots[2].start_time, '15:00');
+});
+
+test('质量闸门：缺少当天交通建议也算未完成', async () => {
+  const { dayDetailGaps } = await import('../services/llm.js');
+  assert.deepEqual(dayDetailGaps({ spots: richSpots(1), transport_notes: '地铁银座线 + 步行' }), []);
+  assert.ok(dayDetailGaps({ spots: richSpots(1), transport_notes: '' }).includes('缺少当天交通建议'));
 });
