@@ -163,6 +163,19 @@ test('地图校验发现大量无法定位的地点时，带反馈重生成并�
   }
 });
 
+test('没有公交数据的地区：不会把驾车当作公共交通方案展示', async () => {
+  const server = await startServer({ mock: { transitAvailable: false } });
+  try {
+    const result = await (await post(server.base, { query: '东京五日游，带小孩，想去迪士尼、浅草寺、秋叶原、台场' })).json();
+    const legs = result.routes.flatMap(route => route.legs);
+    assert.ok(legs.length > 0);
+    assert.ok(legs.every(leg => leg.mode !== 'TRANSIT'));
+    assert.ok(legs.filter(leg => leg.mode === 'DRIVE').every(leg => leg.transit_unavailable === true));
+  } finally {
+    await server.close();
+  }
+});
+
 test('大模型短暂 503 自动重试后成功', async () => {
   const server = await startServer({ mock: { llmFailures: [503] } });
   try {

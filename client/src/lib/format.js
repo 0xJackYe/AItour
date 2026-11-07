@@ -65,6 +65,10 @@ export function describeLeg(leg) {
       return { icon: 'transit', label: [`${vehicle}${lineName}`, duration].filter(Boolean).join(' · ') };
     }
     case 'DRIVE':
+      if (leg.transit_unavailable) {
+        // 该地区接口没有公交数据：给出打车参考，并引导到 Google 地图查看公交线路。
+        return { icon: 'car', label: `${[duration ? `打车约 ${duration}` : '打车', distance].filter(Boolean).join(' · ')}（公交线路见 Google 地图）` };
+      }
       return { icon: 'car', label: ['驾车', duration, distance].filter(Boolean).join(' · ') };
     default:
       return { icon: 'route', label: distance ? `约 ${distance}（直线距离）` : '交通方式待定' };

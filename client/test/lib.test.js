@@ -31,6 +31,10 @@ test('交通段描述', () => {
   assert.equal(describeLeg({ mode: 'WALK', duration_seconds: 720, distance_meters: 900 }).label, '步行 12 分钟 · 900 m');
   assert.equal(describeLeg({ mode: 'TRANSIT', duration_seconds: 1080, transit_lines: [{ name: '乌丸线', vehicle: 'SUBWAY' }] }).label, '地铁 乌丸线 · 18 分钟');
   assert.equal(describeLeg({ mode: 'DRIVE', duration_seconds: 1500, distance_meters: 12000 }).label, '驾车 · 25 分钟 · 12 km');
+  assert.equal(
+    describeLeg({ mode: 'DRIVE', transit_unavailable: true, duration_seconds: 900, distance_meters: 6000 }).label,
+    '打车约 15 分钟 · 6.0 km（公交线路见 Google 地图）',
+  );
   assert.equal(describeLeg({ mode: 'STRAIGHT', distance_meters: 3200 }).label, '约 3.2 km（直线距离）');
   assert.equal(describeLeg(null), null);
 });
@@ -117,6 +121,8 @@ test('Google 地图导航链接', () => {
   assert.equal(googleMapsDirectionsUrl([{ name: 'X' }]), null);
   assert.equal(directionsModeFor({ travel_mode: 'WALK' }, 'public_transit'), 'walking');
   assert.equal(directionsModeFor({ travel_mode: 'MIXED' }, 'drive'), 'driving');
+  // 接口没有公交数据而回退为驾车时，导航链接仍用公交模式（Google 地图 App 支持）。
+  assert.equal(directionsModeFor({ travel_mode: 'DRIVE' }, 'public_transit'), 'transit');
 });
 
 test('交通段按出发地点索引', () => {

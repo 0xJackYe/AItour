@@ -26,9 +26,10 @@ const TRANSIT_FIELDS = [
 export function chooseTravelModes(distanceKm, preference = 'public_transit') {
   const walkLimit = preference === 'walk' ? WALK_PREFERRED_MAX_KM : WALK_MAX_KM;
   if (distanceKm <= walkLimit) return ['WALK', preference === 'drive' ? 'DRIVE' : 'TRANSIT'];
-  const modes = preference === 'drive' ? ['DRIVE', 'TRANSIT'] : ['TRANSIT', 'DRIVE'];
-  if (distanceKm <= WALK_FALLBACK_MAX_KM) modes.push('WALK');
-  return modes;
+  if (preference === 'drive') return distanceKm <= WALK_FALLBACK_MAX_KM ? ['DRIVE', 'TRANSIT', 'WALK'] : ['DRIVE', 'TRANSIT'];
+  // 公共交通没有结果时，30 分钟以内的步行比打车更自然。
+  if (distanceKm <= WALK_PREFERRED_MAX_KM) return ['TRANSIT', 'WALK', 'DRIVE'];
+  return distanceKm <= WALK_FALLBACK_MAX_KM ? ['TRANSIT', 'DRIVE', 'WALK'] : ['TRANSIT', 'DRIVE'];
 }
 
 /** 目的地当地“次日上午 10 点”（按经度近似时区），返回 RFC3339 时间。 */
@@ -100,10 +101,16 @@ export async function computeLeg(fromSpot, toSpot, { preference = 'public_transi
   if (distanceKm < 0.05) {
     return { ...base, mode: 'WALK', distance_meters: Math.round(distanceKm * 1000), duration_seconds: 60, geometry: [[from.lat, from.lng], [to.lat, to.lng]] };
   }
+  // Routes API 在部分地区（例如日本）不提供公共交通数据。此时驾车结果只作为
+  // 距离 / 时长参考，并标记 transit_unavailable，前端提示到 Google 地图查看公交线路。
+  let transitMissing = false;
   for (const mode of chooseTravelModes(distanceKm, preference)) {
     try {
       const route = await computeRoute(requestBody(from, to, mode), mode === 'TRANSIT' ? TRANSIT_FIELDS : BASE_FIELDS);
-      if (!route?.polyline?.encodedPolyline) continue;
+      if (!route?.polyline?.encodedPolyline) {
+        if (mode === 'TRANSIT') transitMissing = true;
+        continue;
+      }
       const lines = mode === 'TRANSIT' ? transitLines(route) : [];
       return {
         ...base,
@@ -113,9 +120,11 @@ export async function computeLeg(fromSpot, toSpot, { preference = 'public_transi
         duration_seconds: parseDuration(route.duration),
         geometry: decodePolyline(route.polyline.encodedPolyline),
         ...(lines.length ? { transit_lines: lines } : {}),
+        ...(mode === 'DRIVE' && transitMissing && preference !== 'drive' ? { transit_unavailable: true } : {}),
       };
     } catch (error) {
       if (isAbortError(error) || currentSignal()?.aborted) throw error;
+      if (mode === 'TRANSIT') transitMissing = true;
       log.warn('route.leg_failed', { mode, message: error.message });
     }
   }

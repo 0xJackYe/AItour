@@ -91,7 +91,7 @@ npm test
 npm run build && npm run test:e2e
 ```
 
-- `npm test`：服务端 111 项单元与集成测试（真实 Express 应用 + 模拟 DeepSeek / Google 上游），以及前端 10 项单元测试。
+- `npm test`：服务端 113 项单元与集成测试（真实 Express 应用 + 模拟 DeepSeek / Google 上游），以及前端 10 项单元测试。
 - `npm run test:e2e`：Playwright 浏览器端到端测试（桌面、移动端、错误 / 澄清 / 取消、地图不可用降级）。需要先安装 Playwright：`npm i -D playwright && npx playwright install chromium`。
 - GitHub Actions 在每次推送和 PR 时自动运行以上全部测试。
 
@@ -124,6 +124,7 @@ AItour/
 
 - AI 生成内容仍可能存在事实偏差；地点核实能拦截错误地点，但不能代替开放时间、票务与实时班次核实。
 - 公共交通线路基于“次日上午 10 点出发”的估算，实际以出行当天为准。
+- 日本等地区的 Google Routes API 不提供公共交通方案：此时 2.5km 内显示步行，更远显示打车参考并标注“公交线路见 Google 地图”，每天的导航链接默认以公交模式打开 Google 地图。
 - 历史记录仅保存在当前浏览器；限流与缓存为单实例内存实现，多实例部署需换成 Redis 等共享存储。
 - Google 地图在中国大陆无法直接访问；面向大陆用户需要接入国内地图服务（见路线图）。
 - 尚未提供账号、支付、分享与云端同步（按计划后续由业务侧接入）。

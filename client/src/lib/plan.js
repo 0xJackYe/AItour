@@ -119,8 +119,8 @@ export function googleMapsDirectionsUrl(spots = [], { travelMode } = {}) {
 }
 
 export function directionsModeFor(route, preference) {
-  if (route?.travel_mode === 'WALK') return 'walking';
-  if (preference === 'drive' || route?.travel_mode === 'DRIVE') return 'driving';
-  if (preference === 'walk') return 'walking';
+  if (preference === 'drive') return 'driving';
+  if (preference === 'walk' || route?.travel_mode === 'WALK') return 'walking';
+  // 即使接口没有返回公交数据（如日本），Google 地图 App 本身仍支持公交导航。
   return 'transit';
 }

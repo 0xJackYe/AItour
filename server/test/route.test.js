@@ -8,6 +8,7 @@ import { createMockUpstream } from '../testing/mockUpstream.js';
 
 test('按距离与偏好选择交通方式', () => {
   assert.deepEqual(chooseTravelModes(0.8), ['WALK', 'TRANSIT']);
+  assert.deepEqual(chooseTravelModes(2), ['TRANSIT', 'WALK', 'DRIVE']);
   assert.deepEqual(chooseTravelModes(3), ['TRANSIT', 'DRIVE', 'WALK']);
   assert.deepEqual(chooseTravelModes(30), ['TRANSIT', 'DRIVE']);
   assert.deepEqual(chooseTravelModes(30, 'drive'), ['DRIVE', 'TRANSIT']);
@@ -27,12 +28,12 @@ test('公共交通出发时间是目的地次日上午 10 点且在未来', () =
 
 const spot = (id, lat, lng) => ({ location_id: id, name: id, coordinates: { lat, lng } });
 
-function withGoogle(fn) {
+function withGoogle(fn, options = {}) {
   return async () => {
     const env = { ...process.env };
     process.env.GOOGLE_MAPS_API_KEY = 'test-google';
     resetGoogleClient();
-    const upstream = createMockUpstream().install();
+    const upstream = createMockUpstream(options).install();
     try {
       await fn(upstream);
     } finally {
@@ -83,3 +84,17 @@ test('按天汇总距离、时长与交通方式', withGoogle(async () => {
   assert.equal(routes[1].legs.length, 0);
   assert.equal(routes[1].travel_mode, null);
 }));
+
+test('没有公交数据的地区（如日本）：近距离改步行，远距离给出打车参考并明确标记', withGoogle(async () => {
+  const nearby = await computeLeg(spot('a', 35.0, 135.77), spot('b', 35.0, 135.792));
+  assert.equal(nearby.mode, 'WALK');
+  assert.equal(nearby.transit_unavailable, undefined);
+
+  const far = await computeLeg(spot('a', 35.0, 135.77), spot('c', 35.04, 135.73));
+  assert.equal(far.mode, 'DRIVE');
+  assert.equal(far.transit_unavailable, true);
+
+  const selfDrive = await computeLeg(spot('a', 35.0, 135.77), spot('c', 35.04, 135.73), { preference: 'drive' });
+  assert.equal(selfDrive.mode, 'DRIVE');
+  assert.equal(selfDrive.transit_unavailable, undefined, '自驾偏好下驾车是用户的选择，不需要提示');
+}, { transitAvailable: false }));

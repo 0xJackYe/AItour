@@ -244,6 +244,8 @@ function insideRectangle(place, rectangle) {
  *  - planHook(plan, { purpose, call }): 修改生成结果以注入故障（缺天、错地点等）
  *  - finishReasons: 依次覆盖 plan / outline 调用的 finish_reason（如 ['length']）
  *  - verify: 自审结果或函数
+ *  - googleFailures: 前 N 次 Google 调用返回 503
+ *  - transitAvailable: false 时公共交通返回空结果（模拟日本等地区）
  */
 export function createMockUpstream(options = {}) {
   const {
@@ -254,6 +256,7 @@ export function createMockUpstream(options = {}) {
     finishReasons = [],
     verify = null,
     googleFailures = 0,
+    transitAvailable = true,
   } = options;
   const calls = { llm: [], geocode: 0, places: 0, nearby: 0, routes: 0, routeModes: [] };
   const signals = [];
@@ -364,6 +367,8 @@ export function createMockUpstream(options = {}) {
     calls.routes++;
     const body = JSON.parse(init.body);
     calls.routeModes.push(body.travelMode);
+    // 模拟 Routes API 在部分地区（如日本）没有公共交通数据：返回空对象。
+    if (body.travelMode === 'TRANSIT' && !transitAvailable) return json({});
     const from = body.origin.location.latLng;
     const to = body.destination.location.latLng;
     const km = haversineKm(from, to);
