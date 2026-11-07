@@ -1,152 +1,210 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import Composer from './components/Composer.jsx';
+import HistoryDrawer from './components/HistoryDrawer.jsx';
+import Icon from './components/Icon.jsx';
 import MapView from './components/MapView.jsx';
-import InputPanel from './components/InputPanel.jsx';
-import PlanPanel from './components/PlanPanel.jsx';
-import HistoryPanel from './components/HistoryPanel.jsx';
-import ParsedRequestPanel from './components/ParsedRequestPanel.jsx';
-import TransitPanel from './components/TransitPanel.jsx';
-import VerificationPanel from './components/VerificationPanel.jsx';
+import PlanView from './components/PlanView.jsx';
+import Progress from './components/Progress.jsx';
+import { normalizeResult } from './lib/plan.js';
 import { generatePlan } from './services/api.js';
-import { savePlan, getHistory, deletePlan } from './services/storage.js';
+import { deletePlan, getHistory, historyToResult, savePlan } from './services/storage.js';
+
+function ErrorCard({ error, onRetry }) {
+  return (
+    <section className="alert alert-error" role="alert">
+      <Icon name="error" />
+      <div className="alert-body">
+        <p className="alert-title">{error.message}</p>
+        {error.requestId && <p className="alert-meta">请求编号 {String(error.requestId).slice(0, 8)}</p>}
+      </div>
+      {error.retryable && <button type="button" className="btn btn-text" onClick={onRetry}>重试</button>}
+    </section>
+  );
+}
+
+function Clarification({ questions }) {
+  return (
+    <section className="alert alert-info" aria-live="polite">
+      <Icon name="info" />
+      <div className="alert-body">
+        <p className="alert-title">再补充一点信息</p>
+        <ul>
+          {questions.map(question => <li key={question}>{question}</li>)}
+        </ul>
+        <p className="alert-meta">在上方补充后重新生成即可。</p>
+      </div>
+    </section>
+  );
+}
 
 export default function App() {
-  const [plan, setPlan] = useState(null);
-  const [routes, setRoutes] = useState([]);
-  const [parsedRequest, setParsedRequest] = useState(null);
-  const [transitMarkers, setTransitMarkers] = useState([]);
-  const [verification, setVerification] = useState(null);
-  const [geocodingWarnings, setGeocodingWarnings] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('idle'); // idle | loading | done | clarify | error
+  const [progress, setProgress] = useState(null);
+  const [result, setResult] = useState(null);
+  const [questions, setQuestions] = useState([]);
   const [error, setError] = useState(null);
-  const [clarification, setClarification] = useState(null);
   const [selectedDay, setSelectedDay] = useState(null);
+  const [focus, setFocus] = useState(null);
   const [history, setHistory] = useState([]);
-  const [showHistory, setShowHistory] = useState(false);
-  const [currentQuery, setCurrentQuery] = useState('');
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const abortRef = useRef(null);
+  const lastQueryRef = useRef('');
 
-  const loadHistory = useCallback(async () => {
+  const refreshHistory = useCallback(async () => {
     try {
-      const h = await getHistory();
-      setHistory(h);
-    } catch (e) {
-      console.error('加载历史失败:', e);
+      setHistory(await getHistory());
+    } catch (storageError) {
+      console.warn('读取历史失败', storageError);
     }
   }, []);
 
-  useEffect(() => { loadHistory(); }, [loadHistory]);
+  useEffect(() => {
+    refreshHistory();
+    return () => abortRef.current?.abort();
+  }, [refreshHistory]);
 
-  const handleSubmit = async (query) => {
-    setLoading(true);
+  const runPlan = useCallback(async (text) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    lastQueryRef.current = text;
+    setStatus('loading');
     setError(null);
-    setClarification(null);
-    setPlan(null);
-    setRoutes([]);
-    setParsedRequest(null);
-    setTransitMarkers([]);
-    setVerification(null);
-    setGeocodingWarnings([]);
-    setSelectedDay(null);
-    setCurrentQuery(query);
-
+    setQuestions([]);
+    setProgress({ stage: 'parse', message: '正在连接规划服务…', progress: 0 });
     try {
-      const result = await generatePlan(query);
-
-      if (result.status === 'need_clarification') {
-        setClarification(result.questions);
+      const data = await generatePlan(text, { signal: controller.signal, onProgress: setProgress });
+      if (controller.signal.aborted) return;
+      if (data.status === 'need_clarification') {
+        setQuestions(data.questions?.length ? data.questions : ['请补充目的地、天数或偏好。']);
+        setStatus('clarify');
         return;
       }
-
-      setPlan(result.plan);
-      setRoutes(result.routes || []);
-      setParsedRequest(result.parsed_request || null);
-      setTransitMarkers(result.transit_markers || []);
-      setVerification(result.verification || null);
-      setGeocodingWarnings(result.geocoding_warnings || []);
-
-      await savePlan(query, {
-        ...result.plan,
-        __parsed_request: result.parsed_request || null,
-        __transit_markers: result.transit_markers || [],
-        __verification: result.verification || null,
-        __geocoding_warnings: result.geocoding_warnings || [],
-      }, result.routes);
-      await loadHistory();
-    } catch (e) {
-      setError(e.message);
+      const next = normalizeResult(data, text);
+      if (!next) throw new Error('返回的行程数据不完整，请重试');
+      setResult(next);
+      setSelectedDay(null);
+      setFocus(null);
+      setStatus('done');
+      try {
+        await savePlan(text, next);
+        await refreshHistory();
+      } catch (storageError) {
+        console.warn('保存历史失败', storageError);
+      }
+    } catch (requestError) {
+      if (controller.signal.aborted || requestError?.name === 'AbortError') return;
+      setError({
+        message: requestError?.message || '规划失败，请重试',
+        code: requestError?.code,
+        requestId: requestError?.requestId,
+        retryable: requestError?.retryable !== false,
+      });
+      setStatus('error');
     } finally {
-      setLoading(false);
+      if (abortRef.current === controller) abortRef.current = null;
     }
-  };
+  }, [refreshHistory]);
 
-  const handleLoadHistory = (item) => {
-    setPlan(item.plan);
-    setRoutes(item.routes || []);
-    setParsedRequest(item.plan?.__parsed_request || null);
-    setTransitMarkers(item.plan?.__transit_markers || []);
-    setVerification(item.plan?.__verification || null);
-    setGeocodingWarnings(item.plan?.__geocoding_warnings || []);
+  const cancel = useCallback(() => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setProgress(null);
+    setStatus('idle');
+  }, []);
+
+  const openHistory = useCallback((item) => {
+    const restored = historyToResult(item);
+    if (!restored) return;
+    abortRef.current?.abort();
+    setResult(restored);
+    setQuery(item.query || '');
     setSelectedDay(null);
-    setClarification(null);
+    setFocus(null);
     setError(null);
-    setShowHistory(false);
-    setCurrentQuery(item.query);
+    setQuestions([]);
+    setStatus('done');
+    setHistoryOpen(false);
+  }, []);
+
+  const removeHistory = useCallback(async (id) => {
+    try {
+      await deletePlan(id);
+    } finally {
+      await refreshHistory();
+    }
+  }, [refreshHistory]);
+
+  const goHome = () => {
+    abortRef.current?.abort();
+    setResult(null);
+    setQuery('');
+    setError(null);
+    setQuestions([]);
+    setSelectedDay(null);
+    setFocus(null);
+    setStatus('idle');
   };
 
-  const handleDeleteHistory = async (id) => {
-    await deletePlan(id);
-    await loadHistory();
-  };
+  const view = status === 'idle' && result ? 'done' : status;
+  const showPlan = Boolean(result) && (view === 'done' || view === 'error');
 
   return (
     <div className="app">
-      <header className="app-header">
-        <h1>🗺️ AItour</h1>
-        <span className="subtitle">AI 旅行规划 · 自然语言生成地图行程</span>
-        <button className="history-toggle" onClick={() => setShowHistory(!showHistory)}>
-          📋 历史 ({history.length})
+      <header className="topbar">
+        <a className="brand" href="/" onClick={(event) => { event.preventDefault(); goHome(); }}>
+          <span className="brand-mark" aria-hidden="true"><Icon name="place" size={18} /></span>
+          AItour
+        </a>
+        <button type="button" className="icon-btn" onClick={() => setHistoryOpen(true)} title="历史行程" aria-label={`历史行程，共 ${history.length} 条`}>
+          <Icon name="history" />
+          {history.length > 0 && <span className="badge" aria-hidden="true">{history.length}</span>}
         </button>
       </header>
 
-      <div className="app-body">
-        <div className="left-panel">
-          <InputPanel onSubmit={handleSubmit} loading={loading} initialQuery={currentQuery} />
+      <aside className="panel">
+        {view === 'idle' && (
+          <div className="hero">
+            <h1>想去哪里？</h1>
+            <p>一句话描述目的地、天数和偏好，AI 帮你排好每天的路线，并在地图上逐一核实。</p>
+          </div>
+        )}
 
-          {error && (
-            <div className="error-box">
-              ❌ {error}
-              <button onClick={() => handleSubmit(currentQuery)}>重试</button>
-            </div>
-          )}
+        <Composer
+          value={query}
+          onChange={setQuery}
+          onSubmit={runPlan}
+          onCancel={cancel}
+          busy={view === 'loading'}
+          hasResult={Boolean(result)}
+        />
 
-          {clarification && (
-            <div className="clarification-box">
-              <h3>🤔 需要更多信息</h3>
-              <ul>
-                {clarification.map((q, i) => <li key={i}>{q}</li>)}
-              </ul>
-              <p>请补充以上信息后重新提交。</p>
-            </div>
-          )}
-
-          <ParsedRequestPanel parsedRequest={parsedRequest} />
-          <VerificationPanel verification={verification} geocodingWarnings={geocodingWarnings} />
-          <TransitPanel markers={transitMarkers} />
-          <PlanPanel plan={plan} selectedDay={selectedDay} onSelectDay={setSelectedDay} routes={routes} />
-        </div>
-
-        <div className="map-container">
-          <MapView plan={plan} routes={routes} selectedDay={selectedDay} transitMarkers={transitMarkers} />
-        </div>
-
-        {showHistory && (
-          <HistoryPanel
-            history={history}
-            onLoad={handleLoadHistory}
-            onDelete={handleDeleteHistory}
-            onClose={() => setShowHistory(false)}
+        {view === 'loading' && <Progress progress={progress} onCancel={cancel} />}
+        {view === 'clarify' && <Clarification questions={questions} />}
+        {view === 'error' && error && <ErrorCard error={error} onRetry={() => runPlan(lastQueryRef.current)} />}
+        {showPlan && (
+          <PlanView
+            result={result}
+            selectedDay={selectedDay}
+            onSelectDay={setSelectedDay}
+            onFocusSpot={id => setFocus({ id, at: Date.now() })}
+            focusedId={focus?.id}
           />
         )}
-      </div>
+      </aside>
+
+      <main className="map-pane" aria-label="地图">
+        <MapView result={view === 'loading' ? null : result} selectedDay={selectedDay} focus={focus} />
+      </main>
+
+      <HistoryDrawer
+        open={historyOpen}
+        items={history}
+        onSelect={openHistory}
+        onDelete={removeHistory}
+        onClose={() => setHistoryOpen(false)}
+      />
     </div>
   );
 }

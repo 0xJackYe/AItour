@@ -1,149 +1,101 @@
+// POST /api/plan —— HTTP 层：输入校验、限流、并发保护、总时长上限、
+// 客户端断开即取消（停止后续大模型与地图调用），支持 SSE 流式进度与普通 JSON 两种响应。
+
 import { Router } from 'express';
-import { callLLM } from '../services/llm.js';
-import { geocodeAllSpots } from '../services/geocode.js';
-import { getRouteGeometry } from '../services/route.js';
-import { findNearbyTransit } from '../services/transit.js';
-import { verifyPlan, buildRegenFeedback } from '../services/verify.js';
+import { getConfig } from '../config.js';
+import { runWithContext } from '../lib/context.js';
+import { AppError, cancelledError, toPublicError } from '../lib/errors.js';
+import { log } from '../lib/log.js';
+import { createRateLimiter } from '../lib/rateLimit.js';
+import { acceptsEventStream, openEventStream } from '../lib/sse.js';
+import { runPlanPipeline } from '../services/pipeline.js';
 
-const router = Router();
+// 去掉控制字符，保留换行与制表符。
+const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  async function run() {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      results[index] = await worker(items[index], index);
-    }
+export function validateQuery(body, maxLength) {
+  const query = body?.query;
+  if (typeof query !== 'string' || !query.trim()) {
+    throw new AppError('INVALID_INPUT', '请输入旅行需求', { status: 400 });
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
-  return results;
+  const cleaned = query.replace(CONTROL_CHARS, '').trim();
+  if (cleaned.length > maxLength) {
+    throw new AppError('INPUT_TOO_LONG', `需求描述过长，请控制在 ${maxLength} 字以内`, { status: 400 });
+  }
+  return cleaned;
 }
 
-router.post('/plan', async (req, res) => {
-  try {
-    const { query } = req.body;
-    if (!query || typeof query !== 'string' || query.trim().length === 0) {
-      return res.status(400).json({ error: '请输入旅行需求' });
+export function createPlanRouter(config = getConfig()) {
+  const router = Router();
+  const rateLimit = createRateLimiter({ max: config.plan.rateLimitMax, windowMs: config.plan.rateLimitWindowMs });
+  let active = 0;
+
+  router.post('/plan', rateLimit, async (req, res, next) => {
+    let query;
+    try {
+      query = validateQuery(req.body, config.plan.maxQueryLength);
+    } catch (error) {
+      next(error);
+      return;
+    }
+    if (!getConfig().llm.apiKey) {
+      next(new AppError('CONFIG_MISSING', '未配置 DEEPSEEK_API_KEY', { status: 503 }));
+      return;
+    }
+    if (active >= config.plan.maxConcurrent) {
+      res.setHeader('Retry-After', '15');
+      next(new AppError('SERVER_BUSY', '并发规划请求已满', { status: 503, retryAfterMs: 15000 }));
+      return;
     }
 
-    const userQuery = query.trim();
-    console.log(`[Plan] 收到请求: "${userQuery.substring(0, 80)}..."`);
+    active++;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => {
+      controller.abort(new AppError('PLAN_TIMEOUT', `行程生成超过 ${Math.round(config.plan.timeoutMs / 1000)} 秒`, { status: 504 }));
+    }, config.plan.timeoutMs);
+    // 注意：必须监听 res 的 close；req 的 close 在请求体读完后就会触发。
+    res.on('close', () => {
+      if (!res.writableEnded) controller.abort(cancelledError('客户端已断开'));
+    });
 
-    // ───── Step 1. 首次生成 ─────
-    console.log('[Plan] 调用 DeepSeek...');
-    const llmResult = await callLLM(userQuery);
-
-    if (llmResult.status === 'need_clarification') {
-      return res.json({
-        status: 'need_clarification',
-        questions: llmResult.clarification_questions || ['请提供更多旅行信息，比如目的地、天数、想去的地方。'],
+    const stream = acceptsEventStream(req) ? openEventStream(res) : null;
+    const context = { requestId: req.requestId, signal: controller.signal, stats: {} };
+    try {
+      const result = await runWithContext(context, () => {
+        log.info('plan.start', { chars: query.length, stream: Boolean(stream) });
+        return runPlanPipeline(query, { onProgress: event => stream?.send('progress', event) });
       });
-    }
-
-    let plan = llmResult.plan;
-    if (!plan) {
-      return res.status(500).json({ error: 'LLM 未返回有效计划' });
-    }
-
-    // ───── Step 2. 自审：覆盖度 + 准确性 ─────
-    console.log('[Plan] LLM 自审中...');
-    let verification = await verifyPlan(userQuery, plan);
-
-    // ───── Step 3. 必要时重生成一次（仅一次，避免无限循环）─────
-    if (verification.needs_regeneration) {
-      console.log('[Plan] 自审发现严重问题，重生成中...');
-      console.log('[Plan] 反馈:', JSON.stringify({
-        missing: verification.missing_spots,
-        incorrect: verification.incorrect_spots,
-      }));
-      try {
-        const feedback = buildRegenFeedback(verification);
-        const retry = await callLLM(userQuery, feedback);
-        if (retry.plan) {
-          plan = retry.plan;
-          verification = await verifyPlan(userQuery, plan);
-          verification.regenerated = true;
-        }
-      } catch (err) {
-        console.warn('[Plan] 重生成失败，沿用首版计划:', err.message);
+      if (stream) {
+        stream.send('result', result);
+        stream.end();
+      } else {
+        res.json(result);
       }
-    }
-
-    // ───── Step 4. 地理编码（逐日城市硬约束 + 外地同名点剔除）─────
-    console.log('[Plan] 地理编码中...');
-    const geocoding = await geocodeAllSpots(plan);
-    const enrichedPlan = geocoding.plan;
-    const geocodingWarnings = geocoding.warnings;
-
-    if (geocoding.rejectedSpots.length > 0) {
-      verification = {
-        ...verification,
-        passed: false,
-        needs_regeneration: false,
-        geocoding_filtered: true,
-        incorrect_spots: [
-          ...(verification.incorrect_spots || []),
-          ...geocoding.rejectedSpots.map(item => ({
-            name: item.spot.name,
-            issue: `${item.reason}（目标：${item.city}, ${item.country}）`,
-          })),
-        ],
+    } catch (error) {
+      const publicError = toPublicError(error);
+      const level = publicError.code === 'CANCELLED' ? 'info' : publicError.status >= 500 ? 'error' : 'warn';
+      runWithContext(context, () => log[level]('plan.failed', {
+        code: error?.code || publicError.code,
+        message: error?.message,
+        ...(level === 'error' && !(error instanceof AppError) ? { stack: error?.stack } : {}),
+      }));
+      const body = {
+        error: publicError.message,
+        code: publicError.code,
+        retryable: publicError.retryable,
+        request_id: req.requestId,
       };
+      if (stream) {
+        stream.send('error', body);
+        stream.end();
+      } else if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+        res.status(publicError.status).json(body);
+      }
+    } finally {
+      active--;
+      clearTimeout(deadline);
     }
+  });
 
-    // ───── Step 5. 交通点位 + 路线 ─────
-    const transitMarkers = await findNearbyTransit(
-      enrichedPlan,
-      enrichedPlan.accommodation?.coordinates || null,
-    );
-
-    const routes = await mapWithConcurrency(enrichedPlan.daily_plans || [], 4, async (day) => {
-      const points = (day.spots || [])
-        .filter(s => s.coordinates)
-        .map(s => [s.coordinates.lat, s.coordinates.lng]);
-
-      const routeData = await getRouteGeometry(points);
-      return {
-        day: day.day,
-        provider: 'google',
-        travel_mode: routeData?.travel_mode || 'WALK',
-        points,
-        geometry: routeData?.coordinates || points,
-        distance_meters: routeData?.distance_meters ?? null,
-        duration_seconds: routeData?.duration_seconds ?? null,
-      };
-    });
-
-    console.log(
-      `[Plan] 完成! 编码 ${geocoding.geocodedCount} 个地点, 校验 ${verification.passed ? '通过' : '存在问题'}, 编码警告 ${geocodingWarnings.length} 条`,
-    );
-
-    res.json({
-      status: 'success',
-      parsed_request: {
-        city: enrichedPlan.city || null,
-        country: enrichedPlan.country || null,
-        days: enrichedPlan.days || null,
-        destinations: enrichedPlan.destinations || [],
-        preferences: enrichedPlan.preferences || null,
-        constraints: {
-          pace: enrichedPlan.preferences?.pace || null,
-          budget: enrichedPlan.preferences?.budget || null,
-        },
-      },
-      plan: enrichedPlan,
-      routes,
-      transit_markers: transitMarkers,
-      verification,
-      geocoding_warnings: geocodingWarnings,
-      geocoded_count: geocoding.geocodedCount,
-      map_provider: 'google',
-    });
-  } catch (err) {
-    console.error('[Plan] 错误:', err);
-    res.status(500).json({ error: err.message || '服务器内部错误' });
-  }
-});
-
-export default router;
+  return router;
+}

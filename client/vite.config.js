@@ -1,24 +1,20 @@
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { fileURLToPath } from 'node:url';
 
-const rootEnvDir = fileURLToPath(new URL('../', import.meta.url));
-
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, rootEnvDir, '');
-  return {
-    plugins: [react()],
-    define: {
-      'import.meta.env.VITE_GOOGLE_MAPS_API_KEY': JSON.stringify(env.GOOGLE_MAPS_API_KEY || ''),
-    },
-    server: {
-      port: 5173,
-      proxy: {
-        '/api': {
-          target: 'http://localhost:3001',
-          changeOrigin: true,
-        },
+// Google Maps 浏览器 Key 不再在构建时写入前端产物，而是运行时由后端
+// /api/config 下发：同一份构建可以部署到任意环境，也便于轮换 Key。
+export default defineConfig({
+  plugins: [react()],
+  build: {
+    target: 'es2020',
+  },
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
       },
     },
-  };
+  },
 });

@@ -1,139 +1,76 @@
-// 计划自审：在生成完计划后，再让 LLM 对照"用户原需求"做一次质量审查。
-// 目标：
-//   1. 覆盖度——用户明确点名的景点是否都进了 daily_plans
-//   2. 准确性——景点是否真实存在、是否属于指定城市、name/name_en 是否对应
-//   3. 合理性——天数与节奏是否匹配
-//
-// 返回 verification 对象给前端展示；若 needs_regeneration 为 true，路由层会
-// 把问题清单作为反馈，调用一次 LLM 重生成。
+// 计划自审：生成后让大模型对照“用户原需求”复核覆盖度、准确性与节奏。
+// 自审是增强项：失败时跳过而不是让整个请求失败；取消信号仍会向上抛出。
 
-const VERIFY_SYSTEM_PROMPT = `你是旅行规划质量审核员。给定用户的"原始自然语言需求"和已生成的"结构化旅行计划"，请逐项检查并严格按 JSON 输出。
+import { getConfig } from '../config.js';
+import { currentSignal } from '../lib/context.js';
+import { isAbortError } from '../lib/errors.js';
+import { log } from '../lib/log.js';
+import { requestJson } from './llm.js';
+import { planOutline, text } from './planSchema.js';
+import { VERIFY_SYSTEM_PROMPT } from './prompts.js';
 
-检查维度：
-1. coverage（覆盖度）：用户在原始需求中明确点名的景点 / 区域 / 体验，是否都出现在 daily_plans 的 spots 里？
-2. accuracy（准确性）：每个 spot 是否真实存在？name 与 name_en 是否对应同一个真实地点？是否的确位于该 spot 所属 day.city / day.country 行政范围内（特别警惕同名地点位于其他城市的情况，比如东京和静冈都有重名地名）？
-3. consistency（一致性）：天数与景点数量是否匹配用户偏好的节奏（relaxed/moderate/intensive）？
-
-严格按以下 JSON 输出，不要任何额外文字：
-{
-  "passed": true | false,
-  "missing_spots": ["用户明确提到但计划中没有的景点名（中文）"],
-  "incorrect_spots": [
-    { "name": "景点名", "issue": "具体问题，如：name_en 不是该景点的官方英文名 / 该景点位于 XX 而非 plan.city / 不存在该景点 等" }
-  ],
-  "warnings": ["其他不严重但值得提醒用户的问题（如：节奏偏紧、某天景点过多）"],
-  "needs_regeneration": true | false
+function skippedVerification() {
+  return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
 }
 
-判定规则：
-- 仅当用户原文里明确写出的景点漏掉了，或景点出现明显错误（不存在 / 在错误城市 / name_en 错误），才算失败 (passed=false)。
-- 仅当 missing_spots 或 incorrect_spots 中存在影响计划主体的严重问题时，needs_regeneration=true；否则即便 passed=false，也可设 false（避免无谓重试）。
-- 不要编造问题。如果计划没有问题，直接 {"passed": true, "missing_spots": [], "incorrect_spots": [], "warnings": [], "needs_regeneration": false}。`;
-
-function buildPlanSummary(plan) {
+export function normalizeVerification(parsed) {
+  const missing = Array.isArray(parsed?.missing_spots)
+    ? parsed.missing_spots.map(item => text(item, 60)).filter(Boolean).slice(0, 10)
+    : [];
+  const incorrect = Array.isArray(parsed?.incorrect_spots)
+    ? parsed.incorrect_spots
+      .map(item => (typeof item === 'string'
+        ? { name: text(item, 60), issue: '' }
+        : { name: text(item?.name, 60), issue: text(item?.issue, 160) }))
+      .filter(item => item.name)
+      .slice(0, 10)
+    : [];
+  const warnings = Array.isArray(parsed?.warnings)
+    ? parsed.warnings.map(item => text(item, 160)).filter(Boolean).slice(0, 8)
+    : [];
   return {
-    city: plan.city,
-    country: plan.country,
-    days: plan.days,
-    preferences: plan.preferences,
-    accommodation: plan.accommodation
-      ? { area: plan.accommodation.area, landmark: plan.accommodation.landmark }
-      : null,
-    daily_plans: (plan.daily_plans || []).map(d => ({
-      day: d.day,
-      city: d.city,
-      country: d.country,
-      theme: d.theme,
-      spots: (d.spots || []).map(s => ({
-        name: s.name,
-        name_en: s.name_en,
-        city: s.city,
-        country: s.country,
-        type: s.type,
-      })),
-    })),
+    passed: parsed?.passed !== false && missing.length === 0 && incorrect.length === 0,
+    missing_spots: missing,
+    incorrect_spots: incorrect,
+    warnings,
+    // 没有列出任何具体问题时不重生成，避免无谓消耗。
+    needs_regeneration: parsed?.needs_regeneration === true && (missing.length > 0 || incorrect.length > 0),
   };
 }
 
 export async function verifyPlan(userQuery, plan) {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false };
-  }
-
-  const baseUrl = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
-  const userMsg = `【用户原始需求】\n${userQuery}\n\n【已生成的旅行计划】\n${JSON.stringify(buildPlanSummary(plan), null, 2)}`;
-
-  let response;
+  if (!getConfig().llm.apiKey) return skippedVerification();
+  const userMessage = `【用户原始需求】\n${userQuery}\n\n【已生成的旅行计划】\n${JSON.stringify(planOutline(plan))}`;
   try {
-    response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
-        messages: [
-          { role: 'system', content: VERIFY_SYSTEM_PROMPT },
-          { role: 'user', content: userMsg },
-        ],
-        temperature: 0.1,
-        max_tokens: 2048,
-        response_format: { type: 'json_object' },
-      }),
+    const parsed = await requestJson(VERIFY_SYSTEM_PROMPT, userMessage, {
+      maxTokens: 2048,
+      temperature: 0.1,
+      purpose: 'verify',
+      retries: 1,
     });
-  } catch (err) {
-    console.warn('[Verify] 调用失败，跳过校验:', err.message);
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
+    return normalizeVerification(parsed);
+  } catch (error) {
+    if (isAbortError(error) || currentSignal()?.aborted) throw error;
+    log.warn('verify.skipped', { code: error.code, message: error.message });
+    return skippedVerification();
   }
-
-  if (!response.ok) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
-  }
-
-  const data = await response.json();
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    const match = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (match) {
-      try { parsed = JSON.parse(match[1].trim()); } catch { /* ignore */ }
-    }
-  }
-  if (!parsed) {
-    return { passed: true, missing_spots: [], incorrect_spots: [], warnings: [], needs_regeneration: false, skipped: true };
-  }
-
-  return {
-    passed: parsed.passed !== false,
-    missing_spots: Array.isArray(parsed.missing_spots) ? parsed.missing_spots : [],
-    incorrect_spots: Array.isArray(parsed.incorrect_spots) ? parsed.incorrect_spots : [],
-    warnings: Array.isArray(parsed.warnings) ? parsed.warnings : [],
-    needs_regeneration: parsed.needs_regeneration === true,
-  };
 }
 
-/**
- * 把审核结果序列化成给 LLM 重生成时的反馈文本。
- */
-export function buildRegenFeedback(verification) {
+/** 把自审结果和地图校验问题整理成重生成时给模型的修正要求。 */
+export function buildRegenFeedback(verification, groundingIssues = []) {
   const lines = ['上一版计划存在以下问题，请修正后重新输出完整 JSON：'];
-  if (verification.missing_spots?.length) {
-    lines.push(`- 缺失了用户明确要求的景点：${verification.missing_spots.join('、')}（必须加入）`);
+  if (verification?.missing_spots?.length) {
+    lines.push(`- 缺少用户明确要求的地点：${verification.missing_spots.join('、')}（必须加入）`);
   }
-  for (const item of verification.incorrect_spots || []) {
-    lines.push(`- "${item.name}" 存在问题：${item.issue}`);
+  for (const item of verification?.incorrect_spots || []) {
+    lines.push(`- “${item.name}”存在问题：${item.issue || '地点信息有误'}`);
   }
-  for (const w of verification.warnings || []) {
-    lines.push(`- 注意：${w}`);
+  for (const issue of groundingIssues.slice(0, 12)) {
+    lines.push(`- “${issue.name}”（${issue.city || '目标城市'}）：${issue.reason}。请换成该城市内真实存在、可在 Google 地图搜索到的地点，或修正 name_en。`);
   }
-  lines.push('请确保所有景点都真实存在、确实位于各自 day.city/day.country 行政范围内（不要被同名地点误导，如东京 vs 静冈）。');
+  for (const warning of verification?.warnings || []) {
+    lines.push(`- 注意：${warning}`);
+  }
+  lines.push('所有地点必须真实存在，并位于各自 spot.city 所写的城市；不要被其他城市的同名地点误导。');
   return lines.join('\n');
 }

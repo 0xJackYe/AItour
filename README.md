@@ -1,49 +1,39 @@
 # AItour
 
-AItour 是一个 AI 旅行规划应用：用户用自然语言描述目的地、天数、预算、节奏和偏好，系统生成结构化行程，再用 Google Maps Platform 校验地点、查询交通点并绘制真实路线。
+AItour 是一个 AI 旅行规划应用：用户用一句自然语言描述目的地、天数、预算、节奏和偏好，系统生成结构化的每日行程，用 Google 地图逐一核实地点，并规划每两个地点之间的真实交通方式与路线。
+
+> 项目审查结论、本次优化细节与商业化路线图见 [docs/REVIEW.md](./docs/REVIEW.md)。
 
 ## 核心能力
 
-- DeepSeek 生成结构化旅行计划，并进行一次独立自审；发现严重问题时最多重生成一次。
-- 12 天及以上的长行程采用“完整骨架 + 每 7 天分段细化”的工作流，避免超长 JSON 被截断。
-- Google Maps JavaScript API 提供原生地图、卫星图、街景、缩放和信息窗口。
-- Google Places、Geocoding 和 Routes 提供地点搜索、城市约束定位、附近交通点和步行路线。
-- 通过国家、城市视口、行政区组件和地点名称多层校验，拦截外地同名景点。
-- WebGL 可用时优先启用矢量地图和连续缩放；低能力环境自动回退到兼容模式。
-- 行程历史保存在浏览器 IndexedDB 中，不上传到项目服务端数据库。
-
-## 技术栈
-
-- 前端：React 18、Vite 5、Google Maps JavaScript API、IndexedDB
-- 后端：Node.js、Express、DeepSeek Chat Completions API
-- 地图数据：Google Places API、Geocoding API、Routes API
-- 测试：Node.js 内置测试运行器
+- **一句话生成行程**：理解“京都三天”“两周”“四天三夜”“半个月自驾”等中英文表达，天数作为硬约束写入提示词并逐日校验。
+- **稳定可靠的生成**：流式调用 + 空闲超时识别卡死；429/5xx/网络错误自动退避重试；缺天只做定向补全；单次输出被截断时自动降级为“骨架 + 分段细化”；8 天以上直接分段生成。
+- **双重校验**：AI 自审与 Google 地点核实并行进行；问题较多时带反馈重生成一次，并在两版之间择优，质量只升不降。
+- **地点核实**：按城市都市圈半径、行政区和名称多层判断，拦截外地同名地点，同时保留凡尔赛宫、东京迪士尼、京都→奈良一日游等近郊/一日游地点；无法确认的地点保留但不上图。
+- **真实路线**：每段路程单独选择步行 / 公共交通（含线路名）/ 驾车；在不破坏时段安排的前提下优化当天顺序，减少折返；一键在 Google 地图中打开当天导航。
+- **实时进度**：SSE 推送“理解需求 → 生成行程 → 校验地点 → 规划路线”各阶段进度，可随时停止；用户断开后服务端立即停止调用付费 API。
+- **简洁界面**：一个输入框 + 一条时间线；地图与行程联动，移动端地图吸顶。
+- **本地历史**：行程保存在浏览器 IndexedDB（最近 30 条），兼容旧版本记录。
 
 ## 工作流
 
 ```text
 自然语言需求
-  -> DeepSeek 生成结构化计划
-  -> DeepSeek 自审，必要时重生成一次
-  -> Google 地点搜索与城市/国家/名称校验
-  -> Google 附近交通点查询
-  -> Google Routes 生成每日路线
-  -> React 地图与计划面板渲染
-  -> IndexedDB 保存本地历史
+  → 确定性解析（天数 / 交通偏好 / 上限检查）
+  → 大模型生成（≤7 天单次生成；≥8 天或被截断时：骨架 + 分段细化；缺天定向补全）
+  → [AI 自审 ∥ Google 地点核实（缓存 + 限流 + 重试）]
+  → 必要时带反馈重生成一次，两版择优
+  → 当日顺序优化 → [逐段路线规划 ∥ 住宿附近交通站]
+  → SSE 推送结果 → React 地图与时间线渲染 → IndexedDB 保存
 ```
 
 ## 本地运行
 
-### 1. 准备环境
+### 1. 准备
 
-需要 Node.js 18 或更高版本，以及已启用以下服务的 Google Maps Platform 项目：
-
-- Maps JavaScript API
-- Places API (New)
-- Geocoding API
-- Routes API
-
-同时需要一个可用的 DeepSeek API Key。
+- Node.js 20 或更高版本（18 已停止维护，但仍可运行）
+- Google Maps Platform 项目，启用：Maps JavaScript API、Places API (New)、Geocoding API、Routes API
+- DeepSeek API Key（或任意 OpenAI 兼容服务，修改 `DEEPSEEK_BASE_URL` 与 `DEEPSEEK_MODEL` 即可）
 
 ### 2. 安装依赖
 
@@ -51,21 +41,14 @@ AItour 是一个 AI 旅行规划应用：用户用自然语言描述目的地、
 npm run install:all
 ```
 
+> 锁文件中的依赖地址是国内镜像。如果在海外网络下安装缓慢，可以加上
+> `--replace-registry-host=always --registry=https://registry.npmjs.org/`。
+
 ### 3. 配置环境变量
 
-复制 `.env.example` 为 `.env`，再填写密钥：
+复制 `.env.example` 为 `.env` 并填写密钥。完整的可选参数（超时、重试、限流、缓存等）见 `.env.example` 中的注释。
 
-```dotenv
-DEEPSEEK_API_KEY=...
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
-GOOGLE_MAPS_API_KEY=...
-PORT=3001
-```
-
-`.env` 和 `api.txt` 已被 Git 忽略。不要把真实密钥提交到仓库。生产环境建议拆分浏览器 Key 与服务端 Key，并分别设置域名、IP 和 API 范围限制。
-
-### 4. 启动项目
+### 4. 启动
 
 Windows 可以双击 `start.bat`，或在终端执行：
 
@@ -76,45 +59,71 @@ npm run dev
 - 前端：http://localhost:5173
 - 后端健康检查：http://localhost:3001/api/health
 
-## 验证
-
-运行后端测试：
+### 5. 生产部署（单进程）
 
 ```bash
-npm --prefix server test
+npm run build
 ```
-
-构建前端：
 
 ```bash
-npm --prefix client run build
+NODE_ENV=production npm start
 ```
 
-当前测试覆盖长行程识别与分段合并、JSON 容错与截断重试、单城市约束、国家/行政区/名称校验以及同名景点唯一键。
+Express 会同时托管 `client/dist` 与 `/api`。浏览器端 Google Key 通过 `/api/config` 在运行时下发，同一份构建产物可以部署到任意环境。部署到反向代理之后时请设置 `TRUST_PROXY`，并确保代理允许 SSE 长连接（关闭响应缓冲、超时 ≥ 10 分钟）。
+
+## 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/plan` | 请求体 `{ "query": "..." }`。请求头带 `Accept: text/event-stream` 时以 SSE 推送 `progress` / `result` / `error` 事件，否则返回 JSON。 |
+| GET | `/api/health` | 服务状态与密钥配置情况（不返回密钥本身）。 |
+| GET | `/api/config` | 浏览器端运行时配置（地图 Key、Map ID、输入限制）。 |
+
+错误统一返回 `{ error, code, retryable, request_id }`，例如 `RATE_LIMITED`、`LLM_TIMEOUT`、`PLAN_INCOMPLETE`。每个响应都带 `X-Request-Id`，便于排查日志。
+
+## 测试
+
+```bash
+npm test
+```
+
+```bash
+npm run build && npm run test:e2e
+```
+
+- `npm test`：服务端 111 项单元与集成测试（真实 Express 应用 + 模拟 DeepSeek / Google 上游），以及前端 10 项单元测试。
+- `npm run test:e2e`：Playwright 浏览器端到端测试（桌面、移动端、错误 / 澄清 / 取消、地图不可用降级）。需要先安装 Playwright：`npm i -D playwright && npx playwright install chromium`。
+- GitHub Actions 在每次推送和 PR 时自动运行以上全部测试。
 
 ## 目录结构
 
 ```text
 AItour/
-├─ client/                 React + Vite 前端
-│  └─ src/
-│     ├─ components/      输入、计划、地图、交通、校验和历史面板
-│     └─ services/        API、Google Maps 加载与 IndexedDB
-├─ server/                 Express 后端
-│  ├─ routes/plan.js      完整规划工作流编排
-│  ├─ services/           LLM、Google、地理编码、路线、交通和自审
-│  └─ test/               自动化回归测试
-├─ .env.example            环境变量模板
-├─ CHANGELOG.md            完整项目更新日志
-├─ prompt.md               项目原始需求说明
-└─ start.bat               Windows 启动脚本
+├─ client/                    React + Vite 前端
+│  ├─ src/components/         输入框、进度、行程、时间线、质量提示、地图、历史
+│  ├─ src/lib/                纯函数：格式化、视图模型、导航链接
+│  ├─ src/services/           API（SSE）、Google Maps 加载、IndexedDB
+│  └─ test/                   前端单元测试
+├─ server/                    Express 后端
+│  ├─ app.js / index.js       应用工厂 / 启动与优雅退出
+│  ├─ config.js               集中配置
+│  ├─ routes/plan.js          HTTP 层：校验、限流、SSE、取消
+│  ├─ services/               需求解析、提示词、大模型、规范化、自审、地点核实、
+│  │                          顺序优化、路线、交通站、工作流编排
+│  ├─ lib/                    重试、缓存、并发、错误、日志、SSE、限流、地理计算
+│  ├─ testing/                模拟上游（测试与 E2E 共用）
+│  └─ test/                   自动化测试
+├─ e2e/                       浏览器端到端测试
+├─ docs/REVIEW.md             项目审查与商业化路线图
+├─ .github/workflows/ci.yml   持续集成
+├─ .env.example               环境变量模板
+└─ CHANGELOG.md               更新日志
 ```
 
 ## 当前边界
 
-- AI 生成内容仍可能存在事实偏差；地理校验能降低地点错误，但不能代替开放时间、票务和实时班次核实。
-- 当前地图路线统一由 Google Routes 的步行模式生成，LLM 文案中的火车、地铁或出租车建议尚未形成统一的分段交通数据。
-- 历史记录仅保存在当前浏览器，清除站点数据后会丢失。
-- 项目尚未提供账号系统、云端同步、部署配置和移动端原生应用。
-
-详细演进过程与验证结果见 [CHANGELOG.md](./CHANGELOG.md)。
+- AI 生成内容仍可能存在事实偏差；地点核实能拦截错误地点，但不能代替开放时间、票务与实时班次核实。
+- 公共交通线路基于“次日上午 10 点出发”的估算，实际以出行当天为准。
+- 历史记录仅保存在当前浏览器；限流与缓存为单实例内存实现，多实例部署需换成 Redis 等共享存储。
+- Google 地图在中国大陆无法直接访问；面向大陆用户需要接入国内地图服务（见路线图）。
+- 尚未提供账号、支付、分享与云端同步（按计划后续由业务侧接入）。

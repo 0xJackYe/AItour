@@ -1,102 +1,70 @@
 import { useEffect, useRef, useState } from 'react';
+import { accommodationsOf, dayColor, spotKey } from '../lib/plan.js';
 import { loadGoogleMaps } from '../services/googleMaps.js';
+import Icon from './Icon.jsx';
 
-const DAY_COLORS = ['#ea4335', '#4285f4', '#34a853', '#f9ab00', '#a142f4', '#00acc1', '#fa7b17'];
-const DEFAULT_CENTER = { lat: 35.6762, lng: 139.6503 };
+const DEFAULT_CENTER = { lat: 30, lng: 120 };
+const DEFAULT_ZOOM = 3;
 
-function markerElement(PinElement, label, color, scale = 1) {
-  return new PinElement({
-    background: color,
-    borderColor: '#ffffff',
-    glyphColor: '#ffffff',
-    glyphText: label,
-    scale,
-  });
-}
-
-// 老历史记录可能保存了 HIGH_QUALITY 路线。即使服务端已改为 OVERVIEW，
-// 前端仍要给旧数据设置复杂度上限，避免缩放时重绘上千个折线顶点。
+// 旧历史记录可能保存了 HIGH_QUALITY 折线，前端限制顶点数，避免缩放卡顿。
 function limitGeometry(points, maxPoints = 320) {
   if (!Array.isArray(points) || points.length <= maxPoints) return points || [];
-  const limited = [];
-  for (let index = 0; index < maxPoints; index++) {
-    const sourceIndex = Math.round((index * (points.length - 1)) / (maxPoints - 1));
-    limited.push(points[sourceIndex]);
-  }
-  return limited;
+  return Array.from({ length: maxPoints }, (_, index) => points[Math.round((index * (points.length - 1)) / (maxPoints - 1))]);
 }
 
-function infoContent(title, rows = [], googleMapsUri = null) {
+function infoContent(title, rows = [], link = null) {
   const root = document.createElement('div');
-  root.className = 'google-info-window';
+  root.className = 'map-info';
   const heading = document.createElement('strong');
   heading.textContent = title;
   root.append(heading);
-
-  rows.filter(Boolean).forEach(row => {
-    const line = document.createElement('div');
+  rows.filter(Boolean).forEach((row) => {
+    const line = document.createElement('p');
     line.textContent = row;
     root.append(line);
   });
-
-  if (googleMapsUri) {
-    const link = document.createElement('a');
-    link.href = googleMapsUri;
-    link.target = '_blank';
-    link.rel = 'noreferrer';
-    link.textContent = '在 Google 地图中查看';
-    root.append(link);
+  if (link) {
+    const anchor = document.createElement('a');
+    anchor.href = link;
+    anchor.target = '_blank';
+    anchor.rel = 'noreferrer';
+    anchor.textContent = '在 Google 地图中查看';
+    root.append(anchor);
   }
   return root;
-}
-
-function clearListeners(listeners, maps) {
-  listeners.forEach(listener => {
-    if (typeof listener === 'function') listener();
-    else if (listener) maps.event.removeListener(listener);
-  });
 }
 
 function supportsAcceleratedWebGL() {
   try {
     const canvas = document.createElement('canvas');
     const options = { failIfMajorPerformanceCaveat: true };
-    return Boolean(
-      canvas.getContext('webgl2', options)
-      || canvas.getContext('webgl', options)
-      || canvas.getContext('experimental-webgl', options),
-    );
+    return Boolean(canvas.getContext('webgl2', options) || canvas.getContext('webgl', options));
   } catch {
     return false;
   }
 }
 
-export default function MapView({ plan, routes, selectedDay, transitMarkers = [] }) {
+export default function MapView({ result, selectedDay, focus }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
   const apiRef = useRef(null);
-  const overlaysRef = useRef({ markers: [], polylines: [], listeners: [], infoWindow: null });
-  const [ready, setReady] = useState(false);
-  const [error, setError] = useState(null);
-  const [renderingMode, setRenderingMode] = useState('uninitialized');
+  const overlaysRef = useRef({ markers: new Map(), all: [], polylines: [], cleanups: [], infoWindow: null });
+  const [status, setStatus] = useState({ state: 'loading', message: '' });
 
   useEffect(() => {
     let cancelled = false;
-    let renderingTypeListener = null;
+    let renderingListener = null;
     loadGoogleMaps()
       .then((api) => {
         if (cancelled || !containerRef.current) return;
-        const useVectorMap = supportsAcceleratedWebGL();
         apiRef.current = api;
-        mapRef.current = new api.maps.Map(containerRef.current, {
+        const vector = supportsAcceleratedWebGL();
+        const map = new api.maps.Map(containerRef.current, {
           center: DEFAULT_CENTER,
-          zoom: 3,
-          mapId: 'DEMO_MAP_ID',
-          // div 方式默认可能回落到 RASTER；显式使用 WebGL 矢量地图和分数级缩放，
-          // 才能获得接近 Google Maps 网页端的连续缩放动画。
-          renderingType: useVectorMap
-            ? api.maps.RenderingType.VECTOR
-            : api.maps.RenderingType.RASTER,
+          zoom: DEFAULT_ZOOM,
+          mapId: api.mapId,
+          // 硬件 WebGL 可用时使用矢量地图 + 分数级缩放，否则回退栅格兼容模式。
+          renderingType: vector ? api.maps.RenderingType.VECTOR : api.maps.RenderingType.RASTER,
           isFractionalZoomEnabled: true,
           tilt: 0,
           tiltInteractionEnabled: false,
@@ -106,176 +74,155 @@ export default function MapView({ plan, routes, selectedDay, transitMarkers = []
           streetViewControl: true,
           fullscreenControl: true,
           zoomControl: true,
-          scaleControl: true,
           gestureHandling: 'greedy',
           clickableIcons: true,
         });
+        mapRef.current = map;
         const syncRenderingType = () => {
-          const type = mapRef.current?.getRenderingType?.();
-          if (containerRef.current && type) {
-            const normalizedType = String(type).toLowerCase();
-            containerRef.current.dataset.renderingType = normalizedType;
-            setRenderingMode(normalizedType);
-          }
+          const type = map.getRenderingType?.();
+          if (containerRef.current && type) containerRef.current.dataset.renderingType = String(type).toLowerCase();
         };
-        renderingTypeListener = mapRef.current.addListener('renderingtype_changed', syncRenderingType);
+        renderingListener = map.addListener('renderingtype_changed', syncRenderingType);
         syncRenderingType();
-        setReady(true);
+        setStatus({ state: 'ready', message: '' });
       })
-      .catch(err => {
-        if (!cancelled) setError(err.message || 'Google 地图加载失败');
+      .catch((error) => {
+        if (cancelled) return;
+        const message = error?.code === 'MAPS_NOT_CONFIGURED'
+          ? '服务端未配置 Google Maps Key'
+          : 'Google 地图加载失败，请检查网络或 Key 的权限配置';
+        setStatus({ state: 'error', message });
       });
     return () => {
       cancelled = true;
-      renderingTypeListener?.remove();
+      renderingListener?.remove?.();
     };
   }, []);
 
+  // 根据行程与选中的天绘制标记和路线。
   useEffect(() => {
-    if (!ready || !mapRef.current || !apiRef.current) return undefined;
+    if (status.state !== 'ready') return undefined;
     const map = mapRef.current;
     const { maps, AdvancedMarkerElement, PinElement } = apiRef.current;
-    const previous = overlaysRef.current;
-    clearListeners(previous.listeners, maps);
-    previous.markers.forEach(marker => { marker.map = null; });
-    previous.polylines.forEach(polyline => polyline.setMap(null));
-    previous.infoWindow?.close();
-
-    const overlays = { markers: [], polylines: [], listeners: [], infoWindow: new maps.InfoWindow() };
+    const overlays = { markers: new Map(), all: [], polylines: [], cleanups: [], infoWindow: new maps.InfoWindow() };
     overlaysRef.current = overlays;
 
+    const plan = result?.plan;
     if (!plan) {
       map.setCenter(DEFAULT_CENTER);
-      map.setZoom(3);
-      return undefined;
+      map.setZoom(DEFAULT_ZOOM);
+      return () => overlays.infoWindow.close();
     }
 
     const bounds = new maps.LatLngBounds();
-    let visiblePointCount = 0;
-    const extend = coordinates => {
-      if (!coordinates) return;
-      bounds.extend({ lat: coordinates.lat, lng: coordinates.lng });
-      visiblePointCount++;
-    };
-    const addMarker = ({ position, title, content, popup }) => {
-      const marker = new AdvancedMarkerElement({
-        map,
-        position,
-        title,
-        content,
-        gmpClickable: true,
-      });
-      const handleClick = () => {
+    let pointCount = 0;
+    const addMarker = ({ id, position, title, pin, popup, zIndex = 1 }) => {
+      const marker = new AdvancedMarkerElement({ map, position, title, content: new PinElement(pin), zIndex, gmpClickable: true });
+      const open = () => {
         overlays.infoWindow.setContent(popup);
         overlays.infoWindow.open({ map, anchor: marker });
       };
-      marker.addEventListener('gmp-click', handleClick);
-      overlays.markers.push(marker);
-      overlays.listeners.push(() => marker.removeEventListener('gmp-click', handleClick));
+      marker.addEventListener('gmp-click', open);
+      overlays.cleanups.push(() => marker.removeEventListener('gmp-click', open));
+      overlays.all.push(marker);
+      if (id) overlays.markers.set(id, { marker, open, position });
+      bounds.extend(position);
+      pointCount++;
     };
 
-    const accommodations = plan.accommodations?.length
-      ? plan.accommodations
-      : plan.accommodation
-        ? [plan.accommodation]
-        : [];
-    accommodations.forEach((accommodation) => {
-      if (!accommodation?.coordinates) return;
-      const coordinates = accommodation.coordinates;
-      extend(coordinates);
-      addMarker({
-        position: coordinates,
-        title: `推荐住宿：${accommodation.city ? `${accommodation.city} · ` : ''}${accommodation.area || ''}`,
-        content: markerElement(PinElement, 'H', '#7e57c2', 1.12),
-        popup: infoContent(
-          `推荐住宿 · ${accommodation.city ? `${accommodation.city} · ` : ''}${accommodation.area || ''}`,
-          [accommodation.reason, coordinates.display_name],
-          coordinates.google_maps_uri,
-        ),
-      });
-    });
-
-    transitMarkers.forEach(item => {
+    accommodationsOf(plan).forEach((item) => {
       if (!item.coordinates) return;
-      extend(item.coordinates);
       addMarker({
-        position: item.coordinates,
-        title: item.name,
-        content: markerElement(PinElement, 'M', '#1a73e8', 1.05),
-        popup: infoContent(
-          `公共交通 · ${item.name}`,
-          [item.coordinates.display_name],
-          item.google_maps_uri || item.coordinates.google_maps_uri,
-        ),
+        position: { lat: item.coordinates.lat, lng: item.coordinates.lng },
+        title: `住宿：${item.area || ''}`,
+        pin: { background: '#3c4043', borderColor: '#ffffff', glyphColor: '#ffffff', glyphText: '住', scale: 1.05 },
+        popup: infoContent(`推荐住宿 · ${item.area || ''}`, [item.city, item.reason], item.coordinates.google_maps_uri),
       });
     });
 
-    (plan.daily_plans || []).forEach(day => {
-      const show = selectedDay === null || selectedDay === day.day;
-      if (!show) return;
-      const color = DAY_COLORS[(day.day - 1) % DAY_COLORS.length];
+    (result.transitMarkers || []).forEach((item) => {
+      if (!item.coordinates) return;
+      addMarker({
+        position: { lat: item.coordinates.lat, lng: item.coordinates.lng },
+        title: item.name,
+        pin: { background: '#ffffff', borderColor: '#5f6368', glyphColor: '#5f6368', glyphText: '站', scale: 0.85 },
+        popup: infoContent(`交通站点 · ${item.name}`, [item.coordinates.display_name], item.google_maps_uri || item.coordinates.google_maps_uri),
+      });
+    });
+
+    (plan.daily_plans || []).forEach((day) => {
+      if (selectedDay !== null && selectedDay !== day.day) return;
+      const color = dayColor(day.day);
       let order = 0;
-      (day.spots || []).forEach(spot => {
+      (day.spots || []).forEach((spot, index) => {
         if (!spot.coordinates) return;
         order++;
-        extend(spot.coordinates);
         addMarker({
-          position: spot.coordinates,
-          title: `Day ${day.day} · ${spot.name}`,
-          content: markerElement(PinElement, String(order), color),
+          id: spotKey(day.day, spot, index),
+          position: { lat: spot.coordinates.lat, lng: spot.coordinates.lng },
+          title: `第 ${day.day} 天 · ${spot.name}`,
+          pin: { background: color, borderColor: '#ffffff', glyphColor: '#ffffff', glyphText: String(order) },
+          zIndex: 10,
           popup: infoContent(
-            `Day ${day.day} · #${order} ${spot.name}`,
-            [
-              spot.description,
-              spot.duration_hours ? `建议停留 ${spot.duration_hours} 小时` : null,
-              spot.tips ? `提示：${spot.tips}` : null,
-              spot.coordinates.display_name,
-            ],
+            `第 ${day.day} 天 · ${order}. ${spot.name}`,
+            [spot.description, spot.duration_hours ? `建议停留 ${spot.duration_hours} 小时` : null, spot.tips],
             spot.coordinates.google_maps_uri,
           ),
         });
       });
     });
 
-    (routes || [])
+    (result.routes || [])
       .filter(route => selectedDay === null || selectedDay === route.day)
       .filter(route => (route.geometry || []).length >= 2)
-      .forEach(route => {
-        const polyline = new maps.Polyline({
+      .forEach((route) => {
+        overlays.polylines.push(new maps.Polyline({
           map,
           path: limitGeometry(route.geometry).map(([lat, lng]) => ({ lat, lng })),
-          strokeColor: DAY_COLORS[(route.day - 1) % DAY_COLORS.length],
-          strokeOpacity: 0.9,
+          strokeColor: dayColor(route.day),
+          strokeOpacity: 0.85,
           strokeWeight: 4,
-          geodesic: false,
           clickable: false,
-        });
-        overlays.polylines.push(polyline);
+        }));
       });
 
-    if (visiblePointCount > 1) {
-      map.fitBounds(bounds, { top: 64, right: 64, bottom: 64, left: 64 });
-    } else if (visiblePointCount === 1) {
+    if (pointCount > 1) map.fitBounds(bounds, 56);
+    else if (pointCount === 1) {
       map.setCenter(bounds.getCenter());
       map.setZoom(14);
     }
 
     return () => {
-      clearListeners(overlays.listeners, maps);
-      overlays.markers.forEach(marker => { marker.map = null; });
+      overlays.cleanups.forEach(cleanup => cleanup());
+      overlays.all.forEach((marker) => { marker.map = null; });
       overlays.polylines.forEach(polyline => polyline.setMap(null));
       overlays.infoWindow.close();
     };
-  }, [ready, plan, routes, selectedDay, transitMarkers]);
+  }, [status.state, result, selectedDay]);
+
+  // 点击行程中的地点：平移地图并打开该地点的信息窗口。
+  useEffect(() => {
+    if (!focus?.id || status.state !== 'ready') return;
+    const entry = overlaysRef.current.markers.get(focus.id);
+    if (!entry) return;
+    const map = mapRef.current;
+    map.panTo(entry.position);
+    if ((map.getZoom?.() ?? 0) < 14) map.setZoom(15);
+    entry.open();
+  }, [focus, status.state]);
 
   return (
-    <div className="google-map-root">
-      <div ref={containerRef} className="google-map-canvas" />
-      {!ready && !error && <div className="map-loading">正在加载 Google 地图…</div>}
-      {error && <div className="map-error">Google 地图加载失败：{error}</div>}
-      <div className="google-provider-badge">
-        Google Maps · {renderingMode === 'vector' ? '矢量加速' : renderingMode === 'raster' ? '兼容模式' : '加载中'}
-      </div>
+    <div className="map-root">
+      <div ref={containerRef} className="map-canvas" />
+      {status.state === 'loading' && <div className="map-status">正在加载地图…</div>}
+      {status.state === 'error' && (
+        <div className="map-fallback">
+          <Icon name="map" size={32} />
+          <p className="map-fallback-title">地图暂不可用</p>
+          <p className="map-fallback-text">{status.message}</p>
+          <p className="map-fallback-text">行程内容不受影响。</p>
+        </div>
+      )}
     </div>
   );
 }

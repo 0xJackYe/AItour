@@ -1,132 +1,93 @@
-const LONG_TRIP_THRESHOLD_DAYS = 12;
-const DETAIL_CHUNK_SIZE = 7;
+// 大模型调用层：OpenAI 兼容协议（默认 DeepSeek）。
+//
+// 可靠性设计：
+//  - 传输层：流式读取 + 总超时 + 空闲超时（识别上游卡死），429/5xx/网络错误
+//    指数退避重试，调用方取消立即中止，不再继续消耗额度；
+//  - 输出层：JSON 解析容错，空输出 / 非法 JSON 带提示重试一次；
+//  - 结构层：规范化 + 逐日完整性校验，缺天只针对缺失天定向补全，而不是整份重来；
+//  - 策略层：长行程走“骨架 + 分段细化”；单次生成被截断时自动降级为分段生成。
+
+import { AppError, isAbortError } from '../lib/errors.js';
+import { createDeadline, mapWithConcurrency, parseRetryAfter, withRetry } from '../lib/async.js';
+import { currentSignal, recordStat } from '../lib/context.js';
+import { log } from '../lib/log.js';
+import { getConfig } from '../config.js';
+import { analyzeDays, analyzeQuery } from './intent.js';
+import {
+  destinationForDay,
+  durationHours,
+  findMissingDays,
+  isMultiCityLabel,
+  mergeDays,
+  normalizeDay,
+  normalizePlan as normalizePlanSchema,
+  planOutline,
+  positiveInt,
+  singleCountry,
+  text,
+} from './planSchema.js';
+import {
+  DETAIL_PROMPT,
+  LONG_OUTLINE_PROMPT,
+  SYSTEM_PROMPT,
+  buildUserMessage,
+  repairPrompt,
+} from './prompts.js';
+
+export const LONG_TRIP_THRESHOLD_DAYS = 8;
+export const DETAIL_CHUNK_SIZE = 5;
+const DETAIL_CONCURRENCY = 3;
 const DEFAULT_MAX_TOKENS = 8192;
+const FALLBACK_TO_CHUNKED = new Set([
+  'LLM_OUTPUT_TRUNCATED',
+  'LLM_INVALID_JSON',
+  'LLM_EMPTY_OUTPUT',
+  'LLM_OUTPUT_INTERRUPTED',
+  'LLM_MISSING_PLAN',
+  'LLM_INCOMPLETE_PLAN',
+]);
 
-const PLAN_SCHEMA = `{
-  "status": "success | need_clarification",
-  "clarification_questions": [],
-  "plan": {
-    "title": "行程标题",
-    "city": "单城市填城市名；多城市填多城市",
-    "country": "单国填国家名；多国用、分隔",
-    "days": 旅行总天数,
-    "summary": "一句话概括",
-    "preferences": {
-      "pace": "relaxed | moderate | intensive",
-      "budget": "budget | moderate | luxury",
-      "interests": ["文化", "自然"]
-    },
-    "destinations": [
-      { "city": "城市", "country": "国家", "start_day": 1, "end_day": 3 }
-    ],
-    "accommodations": [
-      { "city": "城市", "country": "国家", "area": "住宿区域", "reason": "原因", "landmark": "可地理编码地标" }
-    ],
-    "accommodation": { "area": "单城市兼容字段", "reason": "原因", "landmark": "地标" },
-    "daily_plans": [
-      {
-        "day": 1,
-        "city": "当天所在城市",
-        "country": "当天所在国家",
-        "theme": "当天主题",
-        "spots": [
-          {
-            "name": "景点名称",
-            "name_en": "官方英文名或罗马音，并带城市名消歧",
-            "city": "景点实际所在城市；当天跨城时必须准确填写",
-            "country": "景点实际所在国家",
-            "type": "attraction | restaurant | transport | hotel | shopping",
-            "duration_hours": 2,
-            "description": "简短描述",
-            "tips": "实用建议"
-          }
-        ],
-        "transport_notes": "当天交通建议"
-      }
-    ],
-    "route_reasoning": "路线逻辑",
-    "practical_tips": ["贴士"]
-  }
-}`;
-
-const SYSTEM_PROMPT = `你是旅行规划助手。请把用户需求转换为可被程序直接渲染的 JSON 旅行计划。
-
-必须只输出 JSON，不要 Markdown，不要解释。JSON 结构如下：
-${PLAN_SCHEMA}
-
-规则：
-1. 不编造地点；name_en 必须是官方英文名或常用罗马音。
-2. 单城市和多城市行程都必须给每一天以及每个 spot 填写 city、country，这是后续地图消歧的硬约束。当天去邻近小镇时，spot.city 填小镇而不是住宿城市。
-3. 多城市行程必须填写 destinations 和 accommodations；单城市也要填写 destinations，accommodation 与 accommodations[0] 保持一致。
-4. daily_plans 必须从 Day 1 连续覆盖到用户要求的总天数，不能缺天、重复或跳号。
-5. 每天景点数量符合节奏偏好；relaxed 通常 2-3 个主要地点。
-6. 用户明确点名的地点、国家和体验必须覆盖；跨国路线严格遵守起点、终点和交通方式。
-7. 同名地点必须选当天 city/country 内的候选，并在 name_en 中附带城市或行政区用于消歧。
-8. 信息严重不足才返回 need_clarification。
-9. 描述和 tips 要简短，优先保证完整 JSON 和完整天数。`;
-
-const LONG_OUTLINE_PROMPT = `你是长途旅行路线架构师。请先输出一份紧凑但完整的长行程骨架，只输出 JSON。
-
-JSON 顶层和 plan 元数据必须遵循下面结构：
-${PLAN_SCHEMA}
-
-这是长行程骨架阶段，daily_plans 中每个 spot 只输出 name、name_en、type；不要输出 description、tips、duration_hours，以节省长度。transport_notes 只写一句。
-
-硬性要求：
-- daily_plans 必须逐日连续覆盖用户要求的全部天数。
-- 每一天和每个 spot 必须有准确的 city 和 country；一日跨城时 spot.city 填景点真实所在地。
-- destinations 的天数范围必须覆盖全程；多国顺序、起点、终点和指定交通方式不得改变。
-- name_en 必须带城市或行政区消歧；不要选择同名的其他城市地点。
-- relaxed 节奏每天安排 2-3 个主要地点。
-- 只输出 JSON，不要 Markdown。`;
-
-const DETAIL_PROMPT = `你是旅行计划细化助手。输入会包含用户原需求和一个已经确定的行程片段骨架。
-只输出以下 JSON：{"daily_plans":[...]}
-
-要求：
-- 不得改变 day、city、country、景点 name、name_en、type，也不得增删景点。
-- 为每个景点补充 duration_hours、简短 description、简短 tips。
-- 补充当天 transport_notes，并遵守用户指定的交通方式和旅行节奏。
-- 只输出 JSON，不要 Markdown。`;
-
-export class LLMOutputError extends Error {
+export class LLMOutputError extends AppError {
   constructor(message, code = 'LLM_INVALID_OUTPUT') {
-    super(message);
+    super(code, message, { status: 502 });
     this.name = 'LLMOutputError';
-    this.code = code;
   }
 }
 
-export function requestedDaysFromText(text = '') {
-  const matches = [...String(text).matchAll(/(\d{1,3})\s*(?:天|日)(?:\s*(?:游|行程|旅行))?/g)];
-  if (matches.length === 0) return null;
-  const values = matches.map(match => Number(match[1])).filter(value => value > 0 && value <= 180);
-  return values.length ? Math.max(...values) : null;
+// ───────────────────────── 兼容旧接口的工具函数 ─────────────────────────
+
+export function requestedDaysFromText(input = '') {
+  return analyzeDays(input).days;
 }
 
-export function isLongTripRequest(text = '') {
-  const days = requestedDaysFromText(text);
+export function isLongTripRequest(input = '') {
+  const info = analyzeDays(input);
+  const days = info.strategyDays ?? info.days;
   return days !== null && days >= LONG_TRIP_THRESHOLD_DAYS;
+}
+
+export function normalizePlan(plan, options = {}) {
+  return normalizePlanSchema(plan, typeof options === 'number' ? { expectedDays: options } : options || {});
 }
 
 export function parseJsonContent(content) {
   if (typeof content !== 'string' || !content.trim()) {
     throw new LLMOutputError('LLM 未返回内容', 'LLM_EMPTY_OUTPUT');
   }
-
-  const trimmed = content.trim().replace(/^\uFEFF/, '');
+  const trimmed = content.trim().replace(/^﻿/, '');
   const candidates = [trimmed];
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced) candidates.push(fenced[1].trim());
   const firstBrace = trimmed.indexOf('{');
   const lastBrace = trimmed.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
-  }
+  if (firstBrace >= 0 && lastBrace > firstBrace) candidates.push(trimmed.slice(firstBrace, lastBrace + 1));
+  // 最后兜底：去掉模型偶尔输出的尾逗号。
+  candidates.push(...candidates.map(item => item.replace(/,\s*([}\]])/g, '$1')));
 
   for (const candidate of [...new Set(candidates)]) {
     try {
-      return JSON.parse(candidate);
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object') return parsed;
     } catch {
       // 继续尝试下一个候选片段。
     }
@@ -134,251 +95,471 @@ export function parseJsonContent(content) {
   throw new LLMOutputError('LLM 返回了无法解析的内容', 'LLM_INVALID_JSON');
 }
 
-function llmConfig() {
-  const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) throw new Error('未配置 DEEPSEEK_API_KEY');
+/** 兼容 https://api.deepseek.com、…/v1、…/compatible-mode/v1、完整 endpoint 等写法。 */
+export function chatCompletionsUrl(baseUrl) {
+  const trimmed = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (/\/chat\/completions$/i.test(trimmed)) return trimmed;
+  if (/\/v\d+[a-z0-9]*$/i.test(trimmed)) return `${trimmed}/chat/completions`;
+  return `${trimmed}/v1/chat/completions`;
+}
+
+// ───────────────────────────── 传输层 ─────────────────────────────
+
+function upstreamError(status, detail, retryAfterMs) {
+  const snippet = String(detail || '').slice(0, 300);
+  if (status === 401 || status === 403) {
+    return new AppError('LLM_AUTH', `LLM 鉴权失败 (${status}): ${snippet}`, { status: 503 });
+  }
+  if (status === 402) return new AppError('LLM_QUOTA', `LLM 账户余额不足: ${snippet}`, { status: 503 });
+  if (status === 429) {
+    return new AppError('LLM_RATE_LIMITED', `LLM 限流: ${snippet}`, { status: 503, retryable: true, retryAfterMs });
+  }
+  if ([408, 409, 425].includes(status) || status >= 500) {
+    return new AppError('LLM_UNAVAILABLE', `LLM 服务异常 (${status}): ${snippet}`, { status: 502, retryable: true, retryAfterMs });
+  }
+  return new AppError('LLM_BAD_REQUEST', `LLM 请求被拒绝 (${status}): ${snippet}`, { status: 502 });
+}
+
+function transportError(error, deadline) {
+  if (error instanceof AppError) return error;
+  if (deadline.signal.aborted) {
+    const reason = deadline.signal.reason;
+    if (reason instanceof Error) return reason;
+  }
+  return new AppError('LLM_UNAVAILABLE', `LLM 网络错误: ${error?.cause?.code || error?.message || error}`, {
+    status: 502,
+    retryable: true,
+    cause: error,
+  });
+}
+
+async function readJsonBody(response) {
+  const data = await response.json();
+  if (data?.error) {
+    throw new AppError('LLM_UNAVAILABLE', `LLM 返回错误: ${data.error.message || JSON.stringify(data.error)}`, {
+      status: 502,
+      retryable: true,
+    });
+  }
+  const choice = data?.choices?.[0];
   return {
-    apiKey,
-    baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-    model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+    content: choice?.message?.content ?? '',
+    finishReason: choice?.finish_reason ?? null,
+    usage: data?.usage ?? null,
   };
 }
 
-async function requestJson(systemPrompt, userContent, { maxTokens = DEFAULT_MAX_TOKENS } = {}) {
-  const { apiKey, baseUrl, model } = llmConfig();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 180000);
-  let response;
+async function readEventStream(response, { onDelta, onActivity }) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let content = '';
+  let finishReason = null;
+  let usage = null;
 
-  try {
-    response = await fetch(`${baseUrl}/v1/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userContent },
-        ],
-        temperature: 0.25,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
-      }),
-    });
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error('DeepSeek API 请求超时');
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`DeepSeek API error: ${response.status} - ${err}`);
-  }
-
-  const data = await response.json();
-  const choice = data.choices?.[0];
-  if (choice?.finish_reason === 'length') {
-    throw new LLMOutputError('行程内容超过单次输出长度，正在自动分段生成', 'LLM_OUTPUT_TRUNCATED');
-  }
-  if (choice?.finish_reason && choice.finish_reason !== 'stop') {
-    throw new LLMOutputError(`LLM 输出被中断 (${choice.finish_reason})`, 'LLM_OUTPUT_INTERRUPTED');
-  }
-  return parseJsonContent(choice?.message?.content);
-}
-
-async function requestJsonWithRetry(systemPrompt, userContent, options = {}) {
-  let firstError;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const handleLine = (rawLine) => {
+    const line = rawLine.replace(/\r$/, '');
+    if (!line.startsWith('data:')) return; // 注释行（: keep-alive）、event: 行、空行
+    const payload = line.slice(5).trim();
+    if (!payload || payload === '[DONE]') return;
+    let chunk;
     try {
-      const retryHint = attempt === 0
-        ? ''
-        : '\n\n上一次输出为空、被截断或不是合法 JSON。请缩短描述，确保这次输出完整且只包含 JSON。';
-      return await requestJson(systemPrompt, `${userContent}${retryHint}`, options);
-    } catch (error) {
-      firstError ||= error;
-      if (!(error instanceof LLMOutputError)) throw error;
+      chunk = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (chunk.error) {
+      throw new AppError('LLM_UNAVAILABLE', `LLM 流式错误: ${chunk.error.message || 'unknown'}`, { status: 502, retryable: true });
+    }
+    const choice = chunk.choices?.[0];
+    const delta = choice?.delta?.content;
+    if (delta) {
+      content += delta;
+      onDelta?.(content.length);
+    }
+    if (choice?.finish_reason) finishReason = choice.finish_reason;
+    if (chunk.usage) usage = chunk.usage;
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    onActivity?.();
+    buffer += decoder.decode(value, { stream: true });
+    let newline;
+    while ((newline = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      handleLine(line);
     }
   }
-  throw firstError;
+  buffer += decoder.decode();
+  if (buffer) handleLine(buffer);
+
+  if (!finishReason) {
+    throw new AppError('LLM_STREAM_INTERRUPTED', 'LLM 流式输出意外中断', { status: 502, retryable: true });
+  }
+  return { content, finishReason, usage };
 }
 
-function destinationForDay(destinations, dayNumber) {
-  return (destinations || []).find(item =>
-    Number(item.start_day) <= dayNumber && Number(item.end_day) >= dayNumber,
-  );
+function recordUsage(usage) {
+  if (!usage) return;
+  recordStat('llm_prompt_tokens', usage.prompt_tokens || 0);
+  recordStat('llm_completion_tokens', usage.completion_tokens || 0);
+  recordStat('llm_cache_hit_tokens', usage.prompt_cache_hit_tokens || 0);
 }
 
-export function normalizePlan(plan, requestedDays = null) {
-  if (!plan || typeof plan !== 'object') return plan;
-  const destinations = Array.isArray(plan.destinations) ? plan.destinations : [];
-  const fallbackCity = plan.city && plan.city !== '多城市' ? plan.city : '';
-  const fallbackCountry = plan.country && !String(plan.country).includes('、') ? plan.country : '';
-  const singleDestinationScope = Boolean(fallbackCity && destinations.length <= 1);
-  const dailyPlans = (Array.isArray(plan.daily_plans) ? plan.daily_plans : [])
-    .map((day, index) => {
-      const dayNumber = Number(day.day) || index + 1;
-      const destination = destinationForDay(destinations, dayNumber);
-      const resolvedCity = singleDestinationScope
-        ? destination?.city || fallbackCity
-        : day.city || destination?.city || fallbackCity;
-      const resolvedCountry = singleDestinationScope
-        ? destination?.country || fallbackCountry
-        : day.country || destination?.country || fallbackCountry;
-      return {
-        ...day,
-        day: dayNumber,
-        city: resolvedCity,
-        country: resolvedCountry,
-        spots: (Array.isArray(day.spots) ? day.spots : []).map(spot => ({
-          ...spot,
-          city: singleDestinationScope ? resolvedCity : spot.city || resolvedCity,
-          country: singleDestinationScope ? resolvedCountry : spot.country || resolvedCountry,
-        })),
-      };
-    })
-    .sort((a, b) => a.day - b.day);
+/** 一次 Chat Completions 调用（含传输层重试）。返回 { content, finishReason, usage }。 */
+export async function chatCompletion({
+  system,
+  user,
+  maxTokens = DEFAULT_MAX_TOKENS,
+  temperature = 0.3,
+  onDelta = null,
+  purpose = 'plan',
+  retries,
+} = {}) {
+  const cfg = getConfig().llm;
+  if (!cfg.apiKey) throw new AppError('CONFIG_MISSING', '未配置 DEEPSEEK_API_KEY', { status: 503 });
+  const signal = currentSignal();
+  const url = chatCompletionsUrl(cfg.baseUrl);
+  const body = {
+    model: cfg.model,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user },
+    ],
+    temperature,
+    max_tokens: maxTokens,
+    response_format: { type: 'json_object' },
+  };
+  if (cfg.stream) {
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
 
-  const accommodations = Array.isArray(plan.accommodations) && plan.accommodations.length
-    ? plan.accommodations
-    : plan.accommodation
-      ? [{
-          city: fallbackCity || destinations[0]?.city || '',
-          country: fallbackCountry || destinations[0]?.country || '',
-          ...plan.accommodation,
-        }]
-      : [];
+  return withRetry(async (attempt) => {
+    recordStat('llm_calls');
+    const started = Date.now();
+    const deadline = createDeadline({
+      parentSignal: signal,
+      timeoutMs: cfg.timeoutMs,
+      idleTimeoutMs: cfg.idleTimeoutMs,
+      onTimeout: () => new AppError('LLM_TIMEOUT', `LLM 请求超过 ${Math.round(cfg.timeoutMs / 1000)} 秒`, { status: 504 }),
+      onIdle: () => new AppError('LLM_STALLED', `LLM 超过 ${Math.round(cfg.idleTimeoutMs / 1000)} 秒无数据`, { status: 504, retryable: true }),
+    });
+    try {
+      let response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: cfg.stream ? 'text/event-stream' : 'application/json',
+            Authorization: `Bearer ${cfg.apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: deadline.signal,
+        });
+      } catch (error) {
+        throw transportError(error, deadline);
+      }
+      deadline.touch();
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw upstreamError(response.status, detail, parseRetryAfter(response.headers.get('retry-after')));
+      }
+      let result;
+      try {
+        result = (response.headers.get('content-type') || '').includes('text/event-stream')
+          ? await readEventStream(response, { onDelta, onActivity: deadline.touch })
+          : await readJsonBody(response);
+      } catch (error) {
+        throw transportError(error, deadline);
+      }
+      recordUsage(result.usage);
+      log.info('llm.call', {
+        purpose,
+        attempt,
+        ms: Date.now() - started,
+        finish: result.finishReason,
+        chars: result.content.length,
+        completion_tokens: result.usage?.completion_tokens,
+      });
+      // DeepSeek 在后端资源不足时会以该 finish_reason 结束，属于可重试的瞬时故障。
+      if (result.finishReason === 'insufficient_system_resource') {
+        throw new AppError('LLM_UNAVAILABLE', 'LLM 后端资源不足', { status: 502, retryable: true });
+      }
+      return result;
+    } finally {
+      deadline.dispose();
+    }
+  }, {
+    retries: retries ?? cfg.maxRetries,
+    signal,
+    onRetry: (error, attempt, delay) => log.warn('llm.retry', {
+      purpose,
+      attempt,
+      delay_ms: Math.round(delay),
+      code: error.code,
+      message: error.message,
+    }),
+  });
+}
 
-  return {
-    ...plan,
-    days: Number(plan.days) || requestedDays || dailyPlans.length,
-    destinations,
-    accommodations,
-    accommodation: plan.accommodation || accommodations[0] || null,
-    daily_plans: dailyPlans,
+/** 请求 JSON 输出并解析。截断、内容拦截等结束原因转为结构化错误。 */
+export async function requestJson(system, user, options = {}) {
+  const result = await chatCompletion({ system, user, ...options });
+  if (result.finishReason === 'length') {
+    throw new LLMOutputError('行程内容超过单次输出长度', 'LLM_OUTPUT_TRUNCATED');
+  }
+  if (result.finishReason === 'content_filter') {
+    throw new AppError('LLM_CONTENT_FILTERED', '内容被安全策略拦截', { status: 422 });
+  }
+  if (result.finishReason && result.finishReason !== 'stop') {
+    throw new LLMOutputError(`LLM 输出被中断 (${result.finishReason})`, 'LLM_OUTPUT_INTERRUPTED');
+  }
+  return parseJsonContent(result.content);
+}
+
+/** 输出层重试：空输出、非法 JSON 等带提示再请求一次。 */
+async function requestJsonWithRetry(system, user, { attempts = 2, noRetryCodes = [], ...options } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const hint = attempt === 0
+        ? ''
+        : '\n\n上一次输出为空、被截断或不是合法 JSON。请精简文字，确保这次输出完整且只包含 JSON。';
+      return await requestJson(system, `${user}${hint}`, options);
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof LLMOutputError) || noRetryCodes.includes(error.code)) throw error;
+      log.warn('llm.output_retry', { purpose: options.purpose, code: error.code });
+    }
+  }
+  throw lastError;
+}
+
+// ───────────────────────────── 生成策略 ─────────────────────────────
+
+function chunk(items, size) {
+  const chunks = [];
+  for (let index = 0; index < items.length; index += size) chunks.push(items.slice(index, index + size));
+  return chunks;
+}
+
+function formatDayList(days) {
+  return days.length > 6 ? `${days.slice(0, 6).join('、')} 等` : days.join('、');
+}
+
+function streamReporter(onProgress, { message, expectedChars, from = 0, to = 1 }) {
+  if (!onProgress) return null;
+  let lastAt = 0;
+  return (chars) => {
+    const now = Date.now();
+    if (now - lastAt < 700) return;
+    lastAt = now;
+    const ratio = Math.min(0.95, chars / Math.max(1, expectedChars));
+    onProgress({ stage: 'generate', message: `${message}（已生成 ${chars.toLocaleString('en-US')} 字符）`, fraction: from + (to - from) * ratio });
   };
 }
 
-function assertCompleteDays(plan, expectedDays) {
-  if (!expectedDays) return;
-  const dayNumbers = new Set((plan.daily_plans || []).map(day => Number(day.day)));
-  const missing = [];
-  for (let day = 1; day <= expectedDays; day++) {
-    if (!dayNumbers.has(day)) missing.push(day);
+function clarificationQuestions(result) {
+  const questions = Array.isArray(result?.clarification_questions)
+    ? result.clarification_questions.map(item => text(item, 120)).filter(Boolean).slice(0, 3)
+    : [];
+  return questions.length ? questions : ['请补充目的地、天数，以及想去的地方或偏好。'];
+}
+
+function resolveExpectedDays(plan, intent) {
+  const maxDays = getConfig().plan.maxTripDays;
+  if (intent?.days) return Math.min(intent.days, maxDays);
+  const lastDay = plan.daily_plans.length ? plan.daily_plans[plan.daily_plans.length - 1].day : 0;
+  const expected = Math.max(plan.days || 0, lastDay);
+  return expected ? Math.min(expected, maxDays) : null;
+}
+
+function buildRepairMessage(query, plan, missingDays, intent) {
+  return `${buildUserMessage(query, { intent })}
+
+【当前行程概要】
+${JSON.stringify(planOutline(plan))}
+
+【需要补全的天】
+${missingDays.map(day => `Day ${day}`).join('、')}`;
+}
+
+/** 只为缺失（或空白）的天发起定向补全，最多两轮。 */
+async function completeMissingDays(query, plan, { intent, compact, onProgress }) {
+  const expected = resolveExpectedDays(plan, intent);
+  if (!expected) throw new LLMOutputError('无法确定行程天数', 'LLM_INCOMPLETE_PLAN');
+  let current = { ...plan, daily_plans: plan.daily_plans.filter(day => day.day <= expected) };
+  let missing = findMissingDays(current, expected);
+
+  for (let round = 0; round < 2 && missing.length > 0; round++) {
+    log.warn('llm.repair_days', { round, missing });
+    onProgress?.({ stage: 'generate', message: `正在补全第 ${formatDayList(missing)} 天…` });
+    const groups = chunk(missing, DETAIL_CHUNK_SIZE);
+    const responses = await mapWithConcurrency(groups, DETAIL_CONCURRENCY, async (group) => {
+      try {
+        return await requestJsonWithRetry(repairPrompt({ compact }), buildRepairMessage(query, current, group, intent), {
+          maxTokens: compact ? 4096 : DEFAULT_MAX_TOKENS,
+          purpose: 'repair',
+        });
+      } catch (error) {
+        if (!(error instanceof LLMOutputError)) throw error;
+        log.warn('llm.repair_failed', { days: group, code: error.code });
+        return null;
+      }
+    });
+    const missingSet = new Set(missing);
+    const repaired = responses
+      .flatMap(response => (Array.isArray(response?.daily_plans) ? response.daily_plans : []))
+      .map((raw) => {
+        const dayNumber = positiveInt(raw?.day);
+        if (!dayNumber || !missingSet.has(dayNumber)) return null;
+        const destination = destinationForDay(current.destinations, dayNumber);
+        return normalizeDay(raw, {
+          dayNumber,
+          city: destination?.city || (isMultiCityLabel(current.city) ? '' : current.city),
+          country: destination?.country || singleCountry(current.country),
+        });
+      })
+      .filter(Boolean);
+    current = mergeDays(current, repaired);
+    missing = findMissingDays(current, expected);
   }
-  if (missing.length) {
-    throw new LLMOutputError(
-      `LLM 长行程缺少 Day ${missing.slice(0, 8).join('、')}${missing.length > 8 ? '…' : ''}`,
-      'LLM_INCOMPLETE_PLAN',
-    );
+
+  if (missing.length > 0) {
+    throw new LLMOutputError(`行程缺少 Day ${formatDayList(missing)}`, 'LLM_INCOMPLETE_PLAN');
   }
+  return { ...current, days: expected };
+}
+
+async function finalizeGeneration(query, result, { intent, compact, onProgress }) {
+  const hasDays = Array.isArray(result?.plan?.daily_plans) && result.plan.daily_plans.length > 0;
+  if (result?.status === 'need_clarification' && !hasDays) {
+    return { status: 'need_clarification', clarification_questions: clarificationQuestions(result) };
+  }
+  if (!result?.plan || typeof result.plan !== 'object') {
+    throw new LLMOutputError('LLM 未返回行程', 'LLM_MISSING_PLAN');
+  }
+  const plan = normalizePlan(result.plan, { expectedDays: intent?.days || null });
+  return { status: 'success', plan: await completeMissingDays(query, plan, { intent, compact, onProgress }) };
+}
+
+async function generateSinglePlan(query, { intent, feedback, onProgress }) {
+  const days = intent?.days || intent?.approxDays || 3;
+  onProgress?.({ stage: 'generate', message: 'AI 正在规划行程…', fraction: 0.02 });
+  const result = await requestJsonWithRetry(SYSTEM_PROMPT, buildUserMessage(query, { intent, feedback }), {
+    maxTokens: DEFAULT_MAX_TOKENS,
+    purpose: 'plan',
+    // 截断说明行程太长，直接降级为分段生成比“请写短一点”更可靠。
+    noRetryCodes: ['LLM_OUTPUT_TRUNCATED'],
+    onDelta: streamReporter(onProgress, { message: 'AI 正在规划行程', expectedChars: 1000 * days + 800 }),
+  });
+  return finalizeGeneration(query, result, { intent, compact: false, onProgress });
+}
+
+function skeletonDay(day) {
+  return {
+    day: day.day,
+    city: day.city,
+    country: day.country,
+    theme: day.theme,
+    spots: day.spots.map(spot => ({
+      name: spot.name,
+      name_en: spot.name_en,
+      city: spot.city,
+      country: spot.country,
+      type: spot.type,
+    })),
+    transport_notes: day.transport_notes,
+  };
 }
 
 function mergeDetailedDay(outlineDay, detailedDay) {
   if (!detailedDay) return outlineDay;
   const detailedSpots = Array.isArray(detailedDay.spots) ? detailedDay.spots : [];
-  const spots = (outlineDay.spots || []).map((spot, index) => {
-    const detail = detailedSpots.find(item => item.name === spot.name || item.name_en === spot.name_en)
+  const spots = outlineDay.spots.map((spot, index) => {
+    const detail = detailedSpots.find(item => item?.name === spot.name || (item?.name_en && item.name_en === spot.name_en))
       || detailedSpots[index]
       || {};
     return {
       ...spot,
-      duration_hours: Number(detail.duration_hours) || Number(spot.duration_hours) || 2,
-      description: detail.description || spot.description || '',
-      tips: detail.tips || spot.tips || '',
+      duration_hours: durationHours(detail.duration_hours) ?? spot.duration_hours ?? 2,
+      description: text(detail.description, 160) || spot.description || '',
+      tips: text(detail.tips, 120) || spot.tips || '',
     };
   });
   return {
     ...outlineDay,
-    theme: detailedDay.theme || outlineDay.theme,
-    transport_notes: detailedDay.transport_notes || outlineDay.transport_notes || '',
+    theme: text(detailedDay.theme, 40) || outlineDay.theme,
+    transport_notes: text(detailedDay.transport_notes, 160) || outlineDay.transport_notes,
     spots,
   };
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  async function run() {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      results[index] = await worker(items[index], index);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
-  return results;
-}
+async function generateLongPlan(query, { intent, feedback, onProgress }) {
+  const days = intent?.days || intent?.strategyDays || intent?.approxDays || 14;
+  onProgress?.({ stage: 'generate', message: '正在生成完整行程骨架…', fraction: 0.02 });
+  const outline = await requestJsonWithRetry(LONG_OUTLINE_PROMPT, buildUserMessage(query, { intent, feedback }), {
+    maxTokens: DEFAULT_MAX_TOKENS,
+    purpose: 'outline',
+    onDelta: streamReporter(onProgress, { message: '正在生成完整行程骨架', expectedChars: 420 * days + 1200, to: 0.45 }),
+  });
+  const skeleton = await finalizeGeneration(query, outline, { intent, compact: true, onProgress });
+  if (skeleton.status !== 'success') return skeleton;
+  const plan = skeleton.plan;
 
-async function generateLongPlan(userMessage, feedback = null) {
-  const expectedDays = requestedDaysFromText(userMessage);
-  const feedbackText = feedback ? `\n\n修正要求：\n${feedback}` : '';
-  let outlineResult;
-  let outlineError;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const completenessHint = attempt === 0
-        ? ''
-        : `\n\n上一次没有完整覆盖 ${expectedDays} 天。请压缩文字，并严格输出 Day 1 到 Day ${expectedDays}。`;
-      outlineResult = await requestJsonWithRetry(
-        LONG_OUTLINE_PROMPT,
-        `${userMessage}${feedbackText}${completenessHint}`,
-        { maxTokens: DEFAULT_MAX_TOKENS },
-      );
-      if (outlineResult.status === 'need_clarification') return outlineResult;
-      outlineResult.plan = normalizePlan(outlineResult.plan, expectedDays);
-      assertCompleteDays(outlineResult.plan, expectedDays);
-      break;
-    } catch (error) {
-      outlineError = error;
-      outlineResult = null;
-    }
-  }
-  if (!outlineResult?.plan) throw outlineError || new Error('长行程骨架生成失败');
-
-  const chunks = [];
-  for (let index = 0; index < outlineResult.plan.daily_plans.length; index += DETAIL_CHUNK_SIZE) {
-    chunks.push(outlineResult.plan.daily_plans.slice(index, index + DETAIL_CHUNK_SIZE));
-  }
-
-  const detailedChunks = await mapWithConcurrency(chunks, 2, async (chunk) => {
+  const chunks = chunk(plan.daily_plans, DETAIL_CHUNK_SIZE);
+  let finished = 0;
+  onProgress?.({ stage: 'generate', message: `正在细化每日行程（共 ${chunks.length} 段）…`, fraction: 0.5 });
+  const detailed = await mapWithConcurrency(chunks, DETAIL_CONCURRENCY, async (days) => {
     try {
       return await requestJsonWithRetry(
         DETAIL_PROMPT,
-        `【用户原需求】\n${userMessage}\n\n【不可更改的行程骨架】\n${JSON.stringify({ daily_plans: chunk })}`,
-        { maxTokens: 4096 },
+        `【用户原需求】\n${query}\n\n【不可更改的行程骨架】\n${JSON.stringify({ daily_plans: days.map(skeletonDay) })}`,
+        { maxTokens: 4096, purpose: 'detail' },
       );
     } catch (error) {
-      console.warn(`[LLM] Day ${chunk[0]?.day}-${chunk.at(-1)?.day} 细化失败，使用骨架兜底: ${error.message}`);
-      return { daily_plans: chunk };
+      if (isAbortError(error) || currentSignal()?.aborted) throw error;
+      // 细化失败不影响行程主体：保留骨架（地点完整，只是缺少描述）。
+      log.warn('llm.detail_failed', { from: days[0]?.day, to: days.at(-1)?.day, code: error.code, message: error.message });
+      return null;
+    } finally {
+      finished++;
+      onProgress?.({ stage: 'generate', message: `已细化 ${finished}/${chunks.length} 段行程`, fraction: 0.5 + 0.5 * (finished / chunks.length) });
     }
   });
 
   const detailByDay = new Map(
-    detailedChunks.flatMap(chunk => chunk?.daily_plans || []).map(day => [Number(day.day), day]),
+    detailed
+      .flatMap(item => (Array.isArray(item?.daily_plans) ? item.daily_plans : []))
+      .map(day => [positiveInt(day?.day), day]),
   );
-  outlineResult.plan.daily_plans = outlineResult.plan.daily_plans.map(day =>
-    mergeDetailedDay(day, detailByDay.get(Number(day.day))),
-  );
-  assertCompleteDays(outlineResult.plan, expectedDays);
-  return outlineResult;
+  return {
+    status: 'success',
+    plan: { ...plan, daily_plans: plan.daily_plans.map(day => mergeDetailedDay(day, detailByDay.get(day.day))) },
+  };
 }
 
-export async function callLLM(userMessage, feedback = null) {
-  if (isLongTripRequest(userMessage)) {
-    console.log(`[LLM] 检测到 ${requestedDaysFromText(userMessage)} 天长行程，启用分段生成`);
-    return generateLongPlan(userMessage, feedback);
+/**
+ * 生成结构化行程。返回 { status, plan?, clarification_questions?, strategy }。
+ * 第二个参数 feedback 为自审/地图校验后的修正要求（重生成时使用）。
+ */
+export async function callLLM(userMessage, feedback = null, { intent = analyzeQuery(userMessage), onProgress = null } = {}) {
+  const strategyDays = intent.strategyDays ?? intent.days ?? 0;
+  if (strategyDays >= LONG_TRIP_THRESHOLD_DAYS) {
+    log.info('llm.strategy', { strategy: 'chunked', days: strategyDays });
+    return { ...(await generateLongPlan(userMessage, { intent, feedback, onProgress })), strategy: 'chunked' };
   }
-
-  const userContent = feedback
-    ? `${userMessage}\n\n---\n${feedback}\n---\n请输出修正后的完整 JSON。`
-    : userMessage;
-  const result = await requestJsonWithRetry(SYSTEM_PROMPT, userContent, { maxTokens: DEFAULT_MAX_TOKENS });
-  if (result.plan) result.plan = normalizePlan(result.plan, requestedDaysFromText(userMessage));
-  return result;
+  try {
+    return { ...(await generateSinglePlan(userMessage, { intent, feedback, onProgress })), strategy: 'single' };
+  } catch (error) {
+    if (!(error instanceof LLMOutputError) || !FALLBACK_TO_CHUNKED.has(error.code)) throw error;
+    log.warn('llm.fallback_chunked', { code: error.code, message: error.message });
+    onProgress?.({ stage: 'generate', message: '行程较长，改为分段生成…', fraction: 0.05 });
+    return { ...(await generateLongPlan(userMessage, { intent, feedback, onProgress })), strategy: 'chunked-fallback' };
+  }
 }

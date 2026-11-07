@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 锁文件记录的是国内镜像地址；CI 中统一改走 npmjs 官方源。
+      - name: Install dependencies
+        run: |
+          npm ci --replace-registry-host=always --registry=https://registry.npmjs.org/
+          npm --prefix server ci --replace-registry-host=always --registry=https://registry.npmjs.org/
+          npm --prefix client ci --replace-registry-host=always --registry=https://registry.npmjs.org/
+      - name: Unit & integration tests
+        run: npm test
+      - name: Build client
+        run: npm run build
+      - name: Browser E2E
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+          npm run test:e2e
