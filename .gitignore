@@ -37,3 +37,6 @@ desktop.ini
 
 # Evaluation outputs (raw model responses)
 eval/results/
+
+# 性能测试结果（npm run perf）
+perf/results/

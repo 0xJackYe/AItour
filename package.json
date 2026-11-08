@@ -14,7 +14,8 @@
     "cloudflare:dev": "npm run build && wrangler dev",
     "cloudflare:deploy": "npm run check && wrangler deploy",
     "install:all": "npm install && npm --prefix server install && npm --prefix client install",
-    "eval": "node eval/run.mjs"
+    "eval": "node eval/run.mjs",
+    "perf": "node --expose-gc perf/run.mjs"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

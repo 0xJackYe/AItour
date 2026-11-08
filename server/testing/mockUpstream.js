@@ -32,6 +32,16 @@ export const CITIES = {
     lat: 34.9756, lng: 138.3828, viewport: [[34.8, 138.1], [35.6, 138.6]],
     area: '静冈站', landmark: '静冈站',
   },
+  sapporo: {
+    names: ['札幌', 'sapporo'], zh: '札幌', countryZh: '日本', countryCode: 'JP', admin: 'Sapporo',
+    lat: 43.0618, lng: 141.3545, viewport: [[42.766, 140.99], [43.19, 141.53]],
+    area: '大通', landmark: '大通站', line: '地铁南北线',
+  },
+  hakodate: {
+    names: ['函馆', 'hakodate', '函館'], zh: '函馆', countryZh: '日本', countryCode: 'JP', admin: 'Hakodate',
+    lat: 41.7687, lng: 140.729, viewport: [[41.7, 140.6], [41.95, 141.2]],
+    area: '函馆站前', landmark: '函馆站前电车站', line: '函馆市电',
+  },
 };
 
 // labelCity：模型给地点标注的城市；admin：Google 地址组件中的行政区。
@@ -69,6 +79,26 @@ export const PLACES = [
   { id: 'tsukiji', city: 'tokyo', name: '筑地场外市场', en: 'Tsukiji Outer Market', lat: 35.6654, lng: 139.7707, type: 'restaurant', cost: '人均约 3000 日元' },
   { id: 'ichiran', city: 'tokyo', name: '一兰拉面 涩谷店', en: 'Ichiran Shibuya', lat: 35.6614, lng: 139.701, type: 'restaurant', cost: '人均约 1200 日元' },
   { id: 'shizuka', city: 'nara', name: '志津香', en: 'Shizuka Kamameshi', lat: 34.6835, lng: 135.8402, type: 'restaurant', cost: '人均约 1500 日元' },
+  // 北海道（多城市：札幌 → 函馆）
+  { id: 'odori', city: 'sapporo', name: '大通公园', en: 'Odori Park', lat: 43.0605, lng: 141.3546 },
+  { id: 'tvtower', city: 'sapporo', name: '札幌电视塔', en: 'Sapporo TV Tower', lat: 43.0611, lng: 141.3564 },
+  { id: 'clocktower', city: 'sapporo', name: '札幌市钟楼', en: 'Sapporo Clock Tower', lat: 43.0625, lng: 141.3536 },
+  { id: 'jingu', city: 'sapporo', name: '北海道神宫', en: 'Hokkaido Jingu', lat: 43.0546, lng: 141.3076 },
+  { id: 'shiroi', city: 'sapporo', name: '白色恋人公园', en: 'Shiroi Koibito Park', lat: 43.0889, lng: 141.2715 },
+  { id: 'beer', city: 'sapporo', name: '札幌啤酒博物馆', en: 'Sapporo Beer Museum', lat: 43.0716, lng: 141.3688 },
+  { id: 'garaku', city: 'sapporo', name: '汤咖喱 GARAKU', en: 'Soup Curry GARAKU', lat: 43.0573, lng: 141.3553, type: 'restaurant', cost: '人均约 1500 日元' },
+  { id: 'daruma', city: 'sapporo', name: '成吉思汗达摩 本店', en: 'Genghis Khan Daruma Honten', lat: 43.0546, lng: 141.3529, type: 'restaurant', cost: '人均约 3000 日元' },
+  { id: 'ramen', city: 'sapporo', name: '札幌拉面横丁', en: 'Sapporo Ramen Yokocho', lat: 43.0563, lng: 141.3533, type: 'restaurant', cost: '人均约 1200 日元' },
+  { id: 'sapporo-st', city: 'sapporo', name: '札幌站', en: 'Sapporo Station', lat: 43.0687, lng: 141.3508, type: 'transport' },
+  { id: 'hakodate-st', city: 'hakodate', name: '函馆站', en: 'Hakodate Station', lat: 41.7737, lng: 140.7264, type: 'transport' },
+  { id: 'asaichi', city: 'hakodate', name: '函馆朝市', en: 'Hakodate Morning Market', lat: 41.7727, lng: 140.7255 },
+  { id: 'kanemori', city: 'hakodate', name: '金森红砖仓库', en: 'Kanemori Red Brick Warehouse', lat: 41.7669, lng: 140.7176 },
+  { id: 'hachiman', city: 'hakodate', name: '八幡坂', en: 'Hachimanzaka Slope', lat: 41.765, lng: 140.7128 },
+  { id: 'goryokaku', city: 'hakodate', name: '五稜郭公园', en: 'Goryokaku Park', lat: 41.7969, lng: 140.757 },
+  { id: 'motomachi', city: 'hakodate', name: '元町教会群', en: 'Motomachi Churches', lat: 41.7616, lng: 140.7108 },
+  { id: 'pierrot', city: 'hakodate', name: '幸运小丑汉堡 港湾店', en: 'Lucky Pierrot Bay Area', lat: 41.7671, lng: 140.7195, type: 'restaurant', cost: '人均约 1000 日元' },
+  { id: 'kikuyo', city: 'hakodate', name: '惠比寿屋食堂', en: 'Ebisuya Shokudo', lat: 41.7731, lng: 140.7261, type: 'restaurant', cost: '人均约 2500 日元' },
+  { id: 'ajisai', city: 'hakodate', name: '函馆面厨房 紫阳花', en: 'Ajisai Ramen', lat: 41.7703, lng: 140.721, type: 'restaurant', cost: '人均约 1100 日元' },
 ];
 
 const STATIONS = {
@@ -77,6 +107,8 @@ const STATIONS = {
   paris: [['夏特雷站', 0.0006, -0.0011], ['卢浮宫-里沃利站', 0.0014, 0.0007]],
   tokyo: [['上野站', 0.0008, 0.0006], ['京成上野站', -0.0012, 0.0004]],
   shizuoka: [['静冈站', 0.001, 0.001]],
+  sapporo: [['大通站', 0.0007, 0.0004], ['札幌站', 0.0068, -0.0037]],
+  hakodate: [['函馆站前电车站', -0.0008, 0.0011]],
 };
 
 function json(data, status = 200, headers = {}) {
@@ -104,6 +136,7 @@ function cityFromText(textValue) {
 
 function cityFromQuery(userMessage) {
   const requirement = String(userMessage).split('【系统解析的硬性约束】')[0].split('【当前行程概要】')[0];
+  if (/札幌|函馆|北海道|sapporo|hakodate/i.test(requirement)) return 'hokkaido';
   // 用户需求里优先识别主城市（京都/巴黎/东京），避免“奈良一日游”被当作主城市。
   for (const key of ['kyoto', 'paris', 'tokyo']) {
     if (CITIES[key].names.some(name => requirement.toLowerCase().includes(name))) return key;
@@ -194,6 +227,102 @@ export function buildMockPlan(cityKey, days, { compact = false, userMessage = ''
     daily_plans: dailyPlans,
     route_reasoning: '按区域安排，减少折返',
     practical_tips: ['提前购买交通卡'],
+  };
+}
+
+// 多城市示例：札幌 → 函馆。换城市当天以两座车站开头，transfers 写明车次（或自驾道路）。
+export function buildHokkaidoMockPlan(days = 5, { compact = false, drive = false, withTransfers = true } = {}) {
+  const total = Math.max(2, days);
+  const sapporoDays = Math.max(1, total - 2);
+  const transferDay = sapporoDays + 1;
+  const pools = {
+    sapporo: { sights: ['odori', 'clocktower', 'tvtower', 'jingu', 'shiroi', 'beer'], meals: ['garaku', 'daruma', 'ramen'] },
+    hakodate: { sights: ['asaichi', 'kanemori', 'hachiman', 'goryokaku', 'motomachi'], meals: ['pierrot', 'kikuyo', 'ajisai'] },
+  };
+  const byId = id => PLACES.find(place => place.id === id);
+  const counters = { sapporo: 0, hakodate: 0 };
+  const nextSight = (key) => {
+    const list = pools[key].sights;
+    return byId(list[counters[key]++ % list.length]);
+  };
+  const station = (id, start, description) => ({
+    ...spotFrom(byId(id), { compact, start_time: start, duration_hours: 0.5 }),
+    ...(compact ? {} : { cost: id === 'sapporo-st' ? 'JR 车票约 9000 日元' : '免费', description, tips: '车站内有寄存柜，可先寄存大件行李' }),
+  });
+  const dailyPlans = Array.from({ length: total }, (_, index) => {
+    const day = index + 1;
+    const key = day < transferDay ? 'sapporo' : 'hakodate';
+    const meals = pools[key].meals;
+    const lunch = byId(meals[index % meals.length]);
+    const dinner = byId(meals[(index + 1) % meals.length]);
+    let spots;
+    if (day === transferDay && !drive) {
+      spots = [
+        station('sapporo-st', '08:00', '札幌站乘坐 JR 特急北斗号前往函馆，车程约 3 小时 45 分，沿途可看内浦湾海景。'),
+        station('hakodate-st', '11:45', '抵达函馆站，出站即是函馆朝市，可先把行李寄存在车站。'),
+        spotFrom(lunch, { compact, start_time: '12:30', duration_hours: 1 }),
+        spotFrom(nextSight(key), { compact, start_time: '14:30', duration_hours: 2 }),
+        spotFrom(dinner, { compact, start_time: '18:30', duration_hours: 1.5 }),
+      ];
+    } else {
+      const sights = [nextSight(key), nextSight(key), nextSight(key)];
+      spots = [sights[0], sights[1], lunch, sights[2], dinner].map((place, slot) =>
+        spotFrom(place, { compact, start_time: DAY_SLOTS[slot][0], duration_hours: DAY_SLOTS[slot][1] }));
+    }
+    if (compact) spots = spots.filter(spot => spot.type !== 'restaurant');
+    return {
+      day,
+      city: CITIES[key].zh,
+      country: '日本',
+      theme: `${CITIES[key].zh}第${day}天`,
+      spots,
+      transport_notes: day === transferDay
+        ? drive ? '自驾经道央自动车道约 5 小时到函馆' : '札幌站乘 JR 特急北斗号约 3 小时 45 分到函馆站'
+        : `${CITIES[key].line}与步行结合`,
+    };
+  });
+  return {
+    title: `北海道${total}日游`,
+    city: '多城市',
+    country: '日本',
+    days: total,
+    summary: '札幌城市与美食，再乘特急去函馆看夜景',
+    preferences: { pace: 'moderate', budget: 'moderate', transport: drive ? 'drive' : 'public_transit', interests: ['美食', '夜景'] },
+    destinations: [
+      { city: '札幌', country: '日本', start_day: 1, end_day: sapporoDays },
+      { city: '函馆', country: '日本', start_day: transferDay, end_day: total },
+    ],
+    accommodations: [
+      { city: '札幌', country: '日本', area: '大通', reason: '地铁三线交汇，去札幌站一站路', landmark: '大通站', price_hint: '约 600-900 元/晚' },
+      { city: '函馆', country: '日本', area: '函馆站前', reason: '紧邻车站与朝市，电车直达景点', landmark: '函馆站前电车站', price_hint: '约 500-800 元/晚' },
+    ],
+    transfers: withTransfers
+      ? [{
+          day: transferDay,
+          from_city: '札幌',
+          to_city: '函馆',
+          mode: drive ? 'drive' : 'train',
+          service: drive ? '道央自动车道' : 'JR 特急北斗号',
+          from_place: drive ? '' : '札幌站',
+          to_place: drive ? '' : '函馆站',
+          depart_time: '08:00',
+          arrive_time: drive ? '13:00' : '11:45',
+          duration_hours: drive ? 5 : 3.75,
+          cost: drive ? '油费与高速费约 12000 日元' : '每人约 9000 日元',
+          tips: drive ? '冬季注意积雪路况，中途可在长万部休息' : '可用 JR 北海道铁路周游券，建议提前预订指定席',
+          round_trip: false,
+        }]
+      : [],
+    budget_estimate: {
+      currency: 'CNY',
+      per_person: 1300 * total,
+      excludes: '往返大交通',
+      breakdown: [{ item: '住宿', amount: 550 * total }, { item: '餐饮', amount: 400 * total }, { item: '交通', amount: 200 * total }, { item: '门票', amount: 150 * total }],
+    },
+    booking_tips: ['札幌 → 函馆的特急北斗号旺季建议提前一周订指定席'],
+    daily_plans: dailyPlans,
+    route_reasoning: '先札幌后函馆，乘特急一次换城，避免往返',
+    practical_tips: ['函馆山夜景建议日落前 30 分钟上山'],
   };
 }
 
@@ -326,6 +455,9 @@ function insideRectangle(place, rectangle) {
  *  - verify: 自审结果或函数
  *  - googleFailures: 前 N 次 Google 调用返回 503
  *  - transitAvailable: false 时公共交通返回空结果（模拟日本等地区）
+ *  - transitMaxKm: 超过该直线距离的公共交通请求返回空结果（模拟城际铁路没有数据）
+ *  - omitTransfers: 多城市示例不返回 transfers（覆盖按行程推断的路径）
+ *  - googleDelayMs: 每次 Google 调用的模拟耗时（性能测试用）
  */
 export function createMockUpstream(options = {}) {
   const {
@@ -337,6 +469,9 @@ export function createMockUpstream(options = {}) {
     verify = null,
     googleFailures = 0,
     transitAvailable = true,
+    transitMaxKm = Infinity,
+    omitTransfers = false,
+    googleDelayMs = 0,
   } = options;
   const calls = { llm: [], geocode: 0, places: 0, nearby: 0, routes: 0, routeModes: [] };
   const signals = [];
@@ -372,7 +507,13 @@ export function createMockUpstream(options = {}) {
     const call = planCallIndex++;
     const finishReason = finishReasons[call] || 'stop';
     if (finishReason === 'length') return completionResponse('{"status":"success","plan":{"title":"被截断', request, { finishReason });
-    let plan = buildMockPlan(cityKey, daysFromMessage(user), { compact: purpose === 'outline', userMessage: user });
+    let plan = cityKey === 'hokkaido'
+      ? buildHokkaidoMockPlan(daysFromMessage(user), {
+          compact: purpose === 'outline',
+          drive: /自驾/.test(user.split('【系统解析的硬性约束】')[0]),
+          withTransfers: !omitTransfers,
+        })
+      : buildMockPlan(cityKey, daysFromMessage(user), { compact: purpose === 'outline', userMessage: user });
     if (planHook) plan = planHook(plan, { purpose, call, user }) || plan;
     return completionResponse({ status: 'success', clarification_questions: [], plan }, request, { finishReason });
   }
@@ -451,11 +592,12 @@ export function createMockUpstream(options = {}) {
     calls.routes++;
     const body = JSON.parse(init.body);
     calls.routeModes.push(body.travelMode);
-    // 模拟 Routes API 在部分地区（如日本）没有公共交通数据：返回空对象。
-    if (body.travelMode === 'TRANSIT' && !transitAvailable) return json({});
     const from = body.origin.location.latLng;
     const to = body.destination.location.latLng;
     const km = haversineKm(from, to);
+    // 模拟 Routes API 在部分地区（如日本）没有公共交通数据：返回空对象。
+    if (body.travelMode === 'TRANSIT' && (!transitAvailable || km > transitMaxKm)) return json({});
+    const nearest = Object.values(CITIES).sort((a, b) => haversineKm(from, a) - haversineKm(from, b))[0];
     const mid = { latitude: (from.latitude + to.latitude) / 2 + 0.001, longitude: (from.longitude + to.longitude) / 2 };
     const speeds = { WALK: 1.3, TRANSIT: 7, DRIVE: 9 };
     const route = {
@@ -464,11 +606,13 @@ export function createMockUpstream(options = {}) {
       polyline: { encodedPolyline: encodePolyline([from, mid, to]) },
     };
     if (body.travelMode === 'TRANSIT') {
+      const line = nearest.line || '地铁乌丸线';
       route.legs = [{ steps: [
         { travelMode: 'WALK' },
-        { travelMode: 'TRANSIT', transitDetails: { transitLine: { name: '地铁乌丸线', nameShort: '乌丸线', vehicle: { type: 'SUBWAY' } } } },
+        { travelMode: 'TRANSIT', transitDetails: { transitLine: { name: line, nameShort: line.replace(/^地铁/, ''), vehicle: { type: 'SUBWAY' } } } },
       ] }];
     }
+    if (body.travelMode === 'DRIVE' && km > 50) route.description = nearest.zh === '札幌' || nearest.zh === '函馆' ? '道央自动车道' : '高速公路';
     return json({ routes: [route] });
   }
 
@@ -476,6 +620,8 @@ export function createMockUpstream(options = {}) {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (url.includes('/chat/completions')) return handleLLM(init);
     if (url.startsWith('https://maps.googleapis.com/maps/api/geocode/json')) return handleGeocode(url);
+    const google = url.startsWith('https://places.googleapis.com/') || url.startsWith('https://routes.googleapis.com/');
+    if (google && googleDelayMs) await delay(googleDelayMs, init.signal);
     if (url === 'https://places.googleapis.com/v1/places:searchText') return handlePlaces(init);
     if (url === 'https://places.googleapis.com/v1/places:searchNearby') return handleNearby(init);
     if (url === 'https://routes.googleapis.com/directions/v2:computeRoutes') return handleRoutes(init);

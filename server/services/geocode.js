@@ -485,7 +485,8 @@ export async function geocodeAllSpots(plan) {
     }
     const removed = result.status === 'outside_target';
     const warning = {
-      name: `Day ${job.day.day} · ${job.spot.name}`,
+      name: `第 ${job.day.day} 天 · ${job.spot.name}`,
+      day: job.day.day,
       city: job.spotTarget.city,
       country: job.spotTarget.country,
       reason: result.reason || 'Google 地图未找到该地点',

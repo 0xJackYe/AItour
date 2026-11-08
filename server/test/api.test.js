@@ -181,6 +181,38 @@ test('没有公交数据的地区：不会把驾车当作公共交通方案展�
   }
 });
 
+test('多城市：札幌 → 函馆的城市间交通作为一段路程返回，模型没写时按行程推断', async () => {
+  for (const omitTransfers of [false, true]) {
+    const server = await startServer({ mock: { transitMaxKm: 50, omitTransfers } });
+    try {
+      const response = await post(server.base, { query: '北海道五天，先札幌再去函馆，想看函馆山夜景' });
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.transfers.length, 1);
+      const [transfer] = result.transfers;
+      assert.equal(transfer.source, omitTransfers ? 'inferred' : 'model');
+      assert.equal(transfer.day, 4);
+      assert.equal(transfer.mode, 'train');
+      assert.equal(transfer.service, 'JR 特急北斗号');
+      assert.equal(transfer.from.name, '札幌站');
+      assert.equal(transfer.to.name, '函馆站');
+      assert.equal(transfer.route_source, 'schematic');
+      assert.ok(transfer.geometry.length >= 2);
+      assert.equal(transfer.duration_seconds, 225 * 60);
+      assert.equal(result.plan.transfers.length, 1);
+      assert.equal(result.plan.transfers[0].id, transfer.id);
+
+      const day4 = result.routes.find(route => route.day === 4);
+      assert.equal(day4.legs[0].mode, 'TRANSFER');
+      assert.equal(day4.legs[0].transfer_id, transfer.id);
+      const stations = result.plan.daily_plans[3].spots.slice(0, 2).map(spot => spot.start_time);
+      assert.deepEqual(stations, ['08:00', '11:45']);
+    } finally {
+      await server.close();
+    }
+  }
+});
+
 test('大模型短暂 503 自动重试后成功', async () => {
   const server = await startServer({ mock: { llmFailures: [503] } });
   try {

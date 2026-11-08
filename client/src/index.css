@@ -153,6 +153,22 @@ a {
   border-radius: var(--radius-sm);
 }
 
+/* “AI” 用主色单独显示：避免无衬线字体里 AItour 被看成 Altour。 */
+.brand-ai {
+  color: var(--primary);
+  letter-spacing: 0.02em;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.new-trip {
+  padding: 0 14px 0 10px;
+}
+
 .brand-mark {
   display: grid;
   place-items: center;
@@ -708,17 +724,32 @@ details[open] > summary .chevron {
   position: sticky;
   top: -4px;
   z-index: 1;
-  display: flex;
+  display: grid;
   gap: 8px;
   margin: 16px -20px 0;
   padding: 10px 20px;
-  overflow-x: auto;
   background: var(--surface);
+}
+
+.filter-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
   scrollbar-width: none;
 }
 
-.day-filter::-webkit-scrollbar {
+.filter-row::-webkit-scrollbar {
   display: none;
+}
+
+.chip-count {
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.filter-chip[aria-pressed="true"] .chip-count {
+  color: inherit;
 }
 
 .filter-chip {
@@ -757,6 +788,16 @@ details[open] > summary .chevron {
 
 .days {
   margin-top: 4px;
+}
+
+/* 屏幕外的天跳过布局与绘制（长行程首屏与切换更快）。 */
+.day-slot {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 900px;
+}
+
+.day-slot[hidden] {
+  display: none;
 }
 
 .day {
@@ -944,6 +985,250 @@ button.stop-name:hover {
   bottom: 0;
   width: 2px;
   background: repeating-linear-gradient(to bottom, var(--line-strong) 0 4px, transparent 4px 8px);
+}
+
+.leg.is-transfer {
+  color: var(--text-2);
+  font-weight: 500;
+}
+
+/* ───────── 城市间交通 ───────── */
+
+.transfer {
+  display: flex;
+  gap: 12px;
+  margin: 2px 0 14px;
+  padding: 12px 14px 12px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.transfer-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #3c4043;
+  color: #fff;
+}
+
+.transfer-body {
+  min-width: 0;
+}
+
+.transfer-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.transfer-mode {
+  color: var(--text-3);
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.transfer-service {
+  margin-top: 2px;
+  font-size: 13.5px;
+}
+
+.transfer-line {
+  margin-top: 2px;
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.transfer .stop-tip {
+  margin-top: 6px;
+}
+
+.transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin-top: 8px;
+  font-size: 12.5px;
+}
+
+.transfer-actions a,
+.link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--primary);
+  font: inherit;
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.transfer-actions a:hover,
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+.transfer-hint {
+  color: var(--text-3);
+}
+
+.route-card {
+  margin-top: 12px;
+  padding: 14px 12px 10px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.route-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.route-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.route-city button,
+.route-transfer button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.route-city button:hover,
+.route-transfer button:hover {
+  background: var(--surface-2);
+}
+
+.route-city button {
+  gap: 10px;
+  padding: 6px 6px 6px 2px;
+  font-size: 14px;
+}
+
+.route-dot {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  margin-left: 3px;
+  border: 2.5px solid #3c4043;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.route-days {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.route-transfer {
+  position: relative;
+}
+
+/* 两座城市之间的竖向虚线。 */
+.route-transfer::before {
+  content: "";
+  position: absolute;
+  left: 9px;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  background: repeating-linear-gradient(to bottom, #3c4043 0 4px, transparent 4px 8px);
+}
+
+.route-transfer button {
+  gap: 8px;
+  padding: 6px 6px 6px 26px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.route-transfer .icon {
+  flex-shrink: 0;
+  color: #3c4043;
+}
+
+.route-transfer-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.route-transfer-meta {
+  color: var(--text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 地图上的城市标记与城市间交通标记（Advanced Marker 自定义内容）。 */
+.city-pin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 4px;
+  border: 1px solid rgba(60, 64, 67, 0.12);
+  border-radius: var(--radius-full);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  color: var(--text);
+  font: 500 14px/1.2 var(--font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.city-pin-index {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #3c4043;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.city-pin-days {
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.transfer-pin {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #3c4043;
+  color: #fff;
+  box-shadow: var(--shadow-1);
+  cursor: pointer;
+  transform: translateY(50%);
+}
+
+.transfer-pin.is-schematic {
+  border-color: #3c4043;
+  background: var(--surface);
+  color: #3c4043;
 }
 
 .more {
@@ -1330,6 +1615,22 @@ button.stop-name:hover {
     margin: 16px -16px 0;
     padding: 6px 16px;
   }
+
+  /* 还没有行程时不显示空地图，输入框就是第一屏。 */
+  .app.no-plan .map-pane {
+    display: none;
+  }
+
+  .new-trip {
+    padding: 0 10px 0 8px;
+  }
+}
+
+/* 触屏设备没有 Ctrl + Enter。 */
+@media (hover: none) and (pointer: coarse) {
+  .kbd-hint {
+    display: none;
+  }
 }
 
 /* 打印 / 存为 PDF：只保留完整行程。 */
@@ -1351,6 +1652,7 @@ button.stop-name:hover {
   .plan-actions,
   .plan-notice,
   .icon-btn,
+  .transfer-actions,
   .scrim {
     display: none !important;
   }
@@ -1367,6 +1669,10 @@ button.stop-name:hover {
 
   .day {
     break-inside: avoid-page;
+  }
+
+  .day-slot {
+    content-visibility: visible;
   }
 
   .stop,

@@ -42,22 +42,41 @@ export async function savePlan(query, result) {
   return id;
 }
 
+function toItem(record) {
+  return {
+    id: record.id,
+    query: record.query || record.snapshot?.query || '',
+    title: record.title || planTitle(record.plan || record.result?.plan || record.snapshot?.plan),
+    createdAt: record.createdAt,
+    record,
+  };
+}
+
 export async function getHistory(limit = MAX_HISTORY) {
   const db = await getDB();
   const all = await db.getAllFromIndex(STORE_NAME, 'createdAt');
-  return all.reverse().slice(0, limit).map(record => ({
-    id: record.id,
-    query: record.query || '',
-    title: record.title || planTitle(record.plan || record.result?.plan),
-    createdAt: record.createdAt,
-    record,
-  }));
+  return all.reverse().slice(0, limit).map(toItem);
 }
 
-/** 历史记录 → 视图模型（兼容 v1：plan.__parsed_request 等字段）。 */
+/** 按 id 读取一条历史（用于刷新页面或浏览器前进 / 后退时恢复行程）。 */
+export async function getPlanById(id) {
+  const key = Number(id);
+  if (!Number.isFinite(key)) return null;
+  const db = await getDB();
+  const record = await db.get(STORE_NAME, key);
+  return record ? toItem(record) : null;
+}
+
+/**
+ * 历史记录 → 视图模型。兼容三种格式：当前版本（version: 2, result）、
+ * 最早的 v1（plan / routes 平铺）、以及另一分支写入的快照（schemaVersion: 2, snapshot）。
+ */
 export function historyToResult(item) {
   const record = item.record || item;
   if (record.version === 2) return normalizeResult(record.result, record.query);
+  if (record.snapshot) {
+    return normalizeResult({ plan: record.snapshot.plan, routes: record.snapshot.routes }, record.query || record.snapshot.query);
+  }
   return normalizeResult({ plan: record.plan, routes: record.routes }, record.query);
 }
 

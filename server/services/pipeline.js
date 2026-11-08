@@ -2,7 +2,8 @@
 //
 //   需求解析(确定性) → 生成(单次 / 分段) → [AI 自审 ∥ Google 地点落地]
 //     → 必要时带反馈重生成一次（两版择优，质量只升不降）
-//     → 当日顺序优化 → [逐段路线 ∥ 住宿附近交通站] → 组装响应
+//     → 当日顺序优化 → 城市间交通推断 → [城市间路线 → 逐段路线 ∥ 住宿附近交通站]
+//     → 组装响应
 //
 // onProgress 事件：{ stage, message, progress(0-1) }，阶段为
 // parse | generate | verify | regenerate | route。
@@ -21,6 +22,7 @@ import { PROMPT_VERSION } from './prompts.js';
 import { computeRoutes } from './route.js';
 import { applySchedules } from './schedule.js';
 import { findNearbyTransit } from './transit.js';
+import { reconcileTransfers, routeTransfers, transferLeg, transferWarnings } from './transfers.js';
 import { buildRegenFeedback, verifyPlan } from './verify.js';
 
 const RANGES = {
@@ -47,7 +49,7 @@ function createProgress(onProgress) {
 
 function groundingIssues(geocoding) {
   return geocoding.warnings.filter(item =>
-    ['outside_target', 'name_mismatch', 'not_found'].includes(item.code) && item.name.startsWith('Day '));
+    ['outside_target', 'name_mismatch', 'not_found'].includes(item.code) && Number.isInteger(item.day));
 }
 
 function scoreAssessment({ verification, geocoding }) {
@@ -190,21 +192,31 @@ export async function runPlanPipeline(query, { onProgress = () => {} } = {}) {
 
   progress('route', '正在规划每日路线与交通…', 0);
   const ordered = optimizePlanOrder(best.geocoding.plan);
-  const [routes, transitMarkers] = await time('route_ms', () => Promise.all([
-    computeRoutes(ordered.plan, { preference: routePreference(intent, ordered.plan), optimizations: ordered.results }),
-    findNearbyTransit(ordered.plan),
+  const preference = routePreference(intent, ordered.plan);
+  // 每次换城市（含一日游往返）都有一条城市间交通；先算城市间路线，
+  // 出发站与到达站相邻时它直接成为当天的一段路程。
+  const planned = { ...ordered.plan, transfers: reconcileTransfers(ordered.plan, { preference }) };
+  const [[transfers, routes], transitMarkers] = await time('route_ms', () => Promise.all([
+    (async () => {
+      const routed = await routeTransfers(planned, planned.transfers, { preference });
+      progress('route', `已规划 ${routed.length} 段城市间交通`, 0.4);
+      const dayRoutes = await computeRoutes(planned, { preference, optimizations: ordered.results, transfers: routed, transferLeg });
+      return [routed, dayRoutes];
+    })(),
+    findNearbyTransit(planned),
   ]));
   // 按真实路程校验并补全每天的时间线。
-  const scheduled = applySchedules(ordered.plan, routes);
+  const scheduled = applySchedules(planned, routes);
   const plan = scheduled.plan;
   progress('route', '路线规划完成', 1);
 
-  const verification = mergeVerification(best.verification, best.geocoding, plan, scheduled.warnings);
+  const verification = mergeVerification(best.verification, best.geocoding, plan, [...scheduled.warnings, ...transferWarnings(plan, transfers)]);
   if (regeneration === 'applied') verification.regenerated = true;
   const stats = best.geocoding.stats;
   log.info('plan.done', {
     strategy,
     days: plan.days,
+    transfers: transfers.length,
     spots: stats.total,
     verified: stats.verified,
     removed: stats.removed,
@@ -223,11 +235,12 @@ export async function runPlanPipeline(query, { onProgress = () => {} } = {}) {
       constraints: {
         pace: plan.preferences?.pace || null,
         budget: plan.preferences?.budget || null,
-        transport: routePreference(intent, plan),
+        transport: preference,
       },
     },
     plan,
     routes,
+    transfers,
     transit_markers: transitMarkers,
     verification,
     geocoding_warnings: best.geocoding.warnings,

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import Icon from './Icon.jsx';
 
 const EXAMPLES = [
@@ -10,8 +10,13 @@ const EXAMPLES = [
 
 const EXAMPLE_LABELS = ['京都 · 3 天', '东京亲子 · 5 天', '巴黎 · 4 天', '成都美食 · 3 天'];
 
-export default function Composer({ value, onChange, onSubmit, onCancel, busy, hasResult, maxLength = 1000 }) {
+export default function Composer({ value, onChange, onSubmit, onCancel, busy, hasResult, focusSignal = 0, maxLength = 1000 }) {
   const textareaRef = useRef(null);
+
+  // 点“新行程”后直接可以输入。
+  useLayoutEffect(() => {
+    if (focusSignal) textareaRef.current?.focus();
+  }, [focusSignal]);
 
   // 自动增高，最多约 8 行。
   useEffect(() => {
@@ -45,7 +50,9 @@ export default function Composer({ value, onChange, onSubmit, onCancel, busy, ha
           disabled={busy}
         />
         <div className="composer-footer">
-          <span className="composer-hint">{value.length > maxLength * 0.8 ? `${value.length}/${maxLength}` : 'Ctrl + Enter 发送'}</span>
+          <span className="composer-hint">
+            {value.length > maxLength * 0.8 ? `${value.length}/${maxLength}` : <span className="kbd-hint">Ctrl + Enter 发送</span>}
+          </span>
           {/* 两个按钮使用不同 key：避免 React 复用同一个 DOM 元素，导致点击“停止”后
               按钮在同一次点击中变成 submit 而再次提交表单。 */}
           {busy ? (

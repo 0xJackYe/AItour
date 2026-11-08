@@ -56,6 +56,8 @@ export function normalizeResult(data, query = '') {
     query: data.query || query,
     plan,
     routes: data.routes || [],
+    // 城市间交通：接口返回带路线的版本；旧记录或未配置地图时退回计划里的文字版。
+    transfers: (Array.isArray(data.transfers) && data.transfers.length ? data.transfers : plan.transfers) || [],
     parsedRequest: data.parsedRequest || data.parsed_request || plan.__parsed_request || null,
     transitMarkers: data.transitMarkers || data.transit_markers || plan.__transit_markers || [],
     verification: data.verification || plan.__verification || null,

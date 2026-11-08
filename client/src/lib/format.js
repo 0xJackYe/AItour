@@ -30,6 +30,20 @@ const VEHICLE_LABELS = {
   FUNICULAR: '缆车',
 };
 
+/** 城市间交通方式：图标与文案。 */
+export const TRANSFER_MODES = {
+  train: { icon: 'train', label: '火车' },
+  flight: { icon: 'flight', label: '航班' },
+  bus: { icon: 'bus', label: '大巴' },
+  drive: { icon: 'car', label: '自驾' },
+  ferry: { icon: 'ferry', label: '轮渡' },
+};
+const OTHER_TRANSFER = { icon: 'route', label: '城际交通' };
+
+export function transferModeMeta(mode) {
+  return TRANSFER_MODES[mode] || OTHER_TRANSFER;
+}
+
 const CURRENCY_SYMBOLS = { CNY: '¥', RMB: '¥', USD: '$', EUR: '€', GBP: '£' };
 
 export function formatMoney(amount, currency = 'CNY') {
@@ -85,6 +99,15 @@ export function describeLeg(leg) {
       const vehicle = VEHICLE_LABELS[line?.vehicle] || '公共交通';
       const lineName = line?.name && line.name !== vehicle ? ` ${line.name}` : '';
       return { icon: 'transit', label: [`${vehicle}${lineName}`, duration].filter(Boolean).join(' · ') };
+    }
+    case 'TRANSFER': {
+      // 城市间交通作为当天的一段路程：显示车次 / 航班，而不是打车参考。
+      const meta = transferModeMeta(leg.transfer_mode);
+      return {
+        icon: meta.icon,
+        transfer: true,
+        label: [leg.service || meta.label, duration ? `约 ${duration}` : '', leg.schematic ? '' : distance].filter(Boolean).join(' · '),
+      };
     }
     case 'DRIVE':
       if (leg.transit_unavailable) {

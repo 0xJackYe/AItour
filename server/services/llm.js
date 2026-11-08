@@ -510,7 +510,7 @@ async function completeMissingDays(query, plan, { intent, compact, onProgress })
   }
 
   if (missing.length > 0) {
-    throw new LLMOutputError(`行程缺少 Day ${formatDayList(missing)}`, 'LLM_INCOMPLETE_PLAN');
+    throw new LLMOutputError(`行程缺少第 ${formatDayList(missing)} 天`, 'LLM_INCOMPLETE_PLAN');
   }
   return { ...current, days: expected };
 }

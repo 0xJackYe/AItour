@@ -73,7 +73,8 @@ const savedEnv = { ...process.env };
 before(async () => {
   Object.assign(process.env, { DEEPSEEK_API_KEY: 'e2e-deepseek', GOOGLE_MAPS_API_KEY: 'e2e-google', SERVE_CLIENT: 'true' });
   resetGoogleClient();
-  upstream = createMockUpstream({ llmDelayMs: 120 }).install();
+  // transitMaxKm：城际距离没有公共交通数据（与日本的真实情况一致），城市间交通画示意线。
+  upstream = createMockUpstream({ llmDelayMs: 120, transitMaxKm: 50 }).install();
   const app = createApp({ config: getConfig(), clientDist });
   server = await new Promise((resolveServer) => {
     const instance = app.listen(0, '127.0.0.1', () => resolveServer(instance));
@@ -139,7 +140,7 @@ test('桌面端：示例 → 实时进度 → 行程、地图、历史、按天�
     await page.locator('.plan-head h2').waitFor({ timeout: 15000 });
 
     assert.equal(await page.locator('.plan-head h2').textContent(), '京都3日游');
-    assert.equal(await page.locator('article.day').count(), 3);
+    assert.equal(await page.locator('article.day:visible').count(), 3);
     assert.equal(await page.locator('.timeline .stop').count(), 15);
     assert.ok(await page.locator('.timeline .leg').count() >= 12, '每天的地点之间应有交通段');
     assert.match(await page.locator('.quality').textContent(), /15\/15 个地点已在 Google 地图上核实/);
@@ -155,9 +156,9 @@ test('桌面端：示例 → 实时进度 → 行程、地图、历史、按天�
     assert.ok(await page.locator('.day-head a[href^="https://www.google.com/maps/dir/"]').count() === 3);
     await shot(page, '03-plan-desktop');
 
-    // 地图：9 个地点 + 1 个住宿 + 交通站点，3 条路线。
+    // 地图：15 个地点 + 1 个住宿 + 交通站点；每天 4 段路程逐段绘制。
     assert.ok(await activeMarkers(page) >= 17);
-    assert.equal(await activePolylines(page), 3);
+    assert.equal(await activePolylines(page), 12);
 
     // 复制：剪贴板中是去掉 Markdown 标记、可直接粘贴的完整行程。
     await page.getByRole('button', { name: '复制行程文字' }).click();
@@ -172,15 +173,15 @@ test('桌面端：示例 → 实时进度 → 行程、地图、历史、按天�
     await page.emulateMedia({ media: 'print' });
     assert.equal(await page.locator('.map-pane').isVisible(), false);
     assert.equal(await page.locator('.composer-wrap').isVisible(), false);
-    assert.equal(await page.locator('article.day').count(), 3);
+    assert.equal(await page.locator('article.day:visible').count(), 3);
     await page.emulateMedia({ media: 'screen' });
 
     // 按天筛选：只显示第 2 天。
     await page.getByRole('button', { name: '第 2 天' }).click();
-    assert.equal(await page.locator('article.day').count(), 1);
-    assert.equal(await activePolylines(page), 1);
+    assert.equal(await page.locator('article.day:visible').count(), 1);
+    assert.equal(await activePolylines(page), 4);
     await page.getByRole('button', { name: '全部' }).click();
-    assert.equal(await page.locator('article.day').count(), 3);
+    assert.equal(await page.locator('article.day:visible').count(), 3);
 
     // 点击行程中的地点 → 地图平移并打开信息窗口。
     await page.locator('button.stop-name').first().click();
@@ -198,7 +199,7 @@ test('桌面端：示例 → 实时进度 → 行程、地图、历史、按天�
     // 重新规划巴黎：凡尔赛宫保留并定位。
     await generate(page, '巴黎四天三夜，想看埃菲尔铁塔、卢浮宫、凡尔赛宫');
     await page.locator('.plan-head h2', { hasText: '巴黎' }).waitFor({ timeout: 15000 });
-    assert.equal(await page.locator('article.day').count(), 4);
+    assert.equal(await page.locator('article.day:visible').count(), 4);
     const versailles = page.locator('.stop', { hasText: '凡尔赛宫' }).first();
     assert.equal(await versailles.locator('.tag-warn').count(), 0, '凡尔赛宫不应显示“未定位”');
 
@@ -206,9 +207,116 @@ test('桌面端：示例 → 实时进度 → 行程、地图、历史、按天�
     await page.getByRole('button', { name: /历史行程，共 2 条/ }).click();
     await page.locator('.history-item', { hasText: '京都' }).locator('.history-open').click();
     await page.locator('.plan-head h2', { hasText: '京都' }).waitFor();
-    assert.equal(await page.locator('article.day').count(), 3);
+    assert.equal(await page.locator('article.day:visible').count(), 3);
     assert.match(await page.locator('#trip-query').inputValue(), /京都/);
 
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+const markerCount = (page, className) => page.evaluate(name => window.__mapStub.markers
+  .filter(marker => marker.map && marker.content?.classList?.contains(name)).length, className);
+
+test('多城市：路线卡片、城市间交通、总览 / 城市 / 某一天三级地图', async () => {
+  const { page, context, errors } = await openPage();
+  try {
+    await generate(page, '北海道五天，先札幌再去函馆，想看函馆山夜景');
+    await page.locator('.plan-head h2', { hasText: '北海道' }).waitFor({ timeout: 15000 });
+
+    // 路线卡片：札幌 → JR 特急北斗号 → 函馆。
+    const routeCard = page.locator('.route-card');
+    assert.match(await routeCard.textContent(), /札幌第 1–3 天.*JR 特急北斗号 · 约 3 小时 45 分钟.*第 4 天 · 每人约 9000 日元.*函馆第 4–5 天/);
+
+    // 总览地图：两座城市 + 一条城市间交通（日本没有铁路数据 → 虚线示意）+ 方式标记，不画单个地点。
+    assert.equal(await markerCount(page, 'city-pin'), 2);
+    assert.equal(await markerCount(page, 'transfer-pin'), 1);
+    const lines = await page.evaluate(() => window.__mapStub.polylines.filter(line => line.active)
+      .map(line => ({ dashed: Boolean(line.options.icons), color: line.options.strokeColor })));
+    assert.deepEqual(lines, [{ dashed: true, color: '#3c4043' }]);
+    assert.equal(await page.locator('article.day:visible').count(), 5);
+
+    // 换城市当天：两座车站之间是车次，而不是“打车参考”。
+    const transferRow = page.locator('.transfer', { hasText: 'JR 特急北斗号' });
+    assert.match(await transferRow.textContent(), /札幌 → 函馆火车JR 特急北斗号 · 约 3 小时 45 分钟 · 每人约 9000 日元08:00 札幌站 → 11:45 函馆站/);
+    assert.match(await transferRow.textContent(), /地图上为示意直线/);
+    assert.ok(!(await page.locator('article.day:visible').nth(3).textContent()).includes('打车'));
+    await shot(page, '08-multi-city-overview');
+
+    // 点城市：只看函馆两天的地点与路线；第二行可以再选某一天。
+    await page.locator('.day-filter').getByRole('button', { name: /^函馆/ }).click();
+    assert.equal(await page.locator('article.day:visible').count(), 2);
+    assert.equal(await markerCount(page, 'city-pin'), 0);
+    assert.ok(await activePolylines(page) >= 4);
+    await page.locator('.day-filter').getByRole('button', { name: '第 4 天' }).click();
+    assert.equal(await page.locator('article.day:visible').count(), 1);
+    await shot(page, '09-multi-city-day');
+
+    // 在地图上查看这段交通：回到总览并打开信息窗口。
+    await transferRow.getByRole('button', { name: '在地图上查看' }).click();
+    assert.equal(await page.locator('article.day:visible').count(), 5);
+    assert.equal(await page.evaluate(() => window.__mapStub.opened.at(-1)), '札幌 → 函馆 · 火车');
+
+    // 点地图上的城市标记：进入该城市。
+    await page.evaluate(() => window.__mapStub.markers
+      .find(marker => marker.map && marker.content?.classList?.contains('city-pin') && marker.content.textContent.includes('札幌'))
+      .dispatchEvent(new Event('gmp-click')));
+    assert.equal(await page.locator('article.day:visible').count(), 3);
+
+    // 总览里点某个地点：自动切到该地点所在城市并在地图上打开。
+    await page.locator('.day-filter').getByRole('button', { name: '总览' }).click();
+    await page.locator('article.day:visible').nth(4).locator('button.stop-name').first().click();
+    assert.equal(await page.locator('article.day:visible').count(), 2);
+    assert.match(await page.evaluate(() => window.__mapStub.opened.at(-1)), /^第 5 天 · 1\./);
+
+    // 复制的文字版包含城市间交通。
+    await page.getByRole('button', { name: '复制行程文字' }).click();
+    await page.getByRole('status').filter({ hasText: '已复制' }).waitFor();
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    assert.match(copied, /【城市间交通】\n\n- 第 4 天 · 札幌 → 函馆：JR 特急北斗号/);
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test('返回输入页：“新行程”按钮、浏览器后退 / 前进、刷新后恢复行程', async () => {
+  const { page, context, errors } = await openPage();
+  try {
+    await generate(page, '我想去京都玩三天，想去清水寺、伏见稻荷、岚山');
+    await page.locator('.plan-head h2').waitFor({ timeout: 15000 });
+    await page.waitForFunction(() => /[?&]trip=\d+/.test(window.location.search));
+    const tripUrl = page.url();
+
+    // 新行程：回到输入页，输入框清空并获得焦点。
+    await page.getByRole('button', { name: '新行程' }).click();
+    await page.getByRole('heading', { name: '想去哪里？' }).waitFor();
+    assert.equal(await page.locator('#trip-query').inputValue(), '');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'trip-query');
+    assert.equal(new URL(page.url()).search, '');
+    assert.equal(await page.getByRole('button', { name: '新行程' }).count(), 0);
+
+    // 浏览器后退：回到刚才的行程；前进：回到输入页。
+    await page.goBack();
+    await page.locator('.plan-head h2', { hasText: '京都' }).waitFor();
+    assert.equal(page.url(), tripUrl);
+    await page.goForward();
+    await page.getByRole('heading', { name: '想去哪里？' }).waitFor();
+
+    // 刷新：从本地历史恢复同一份行程。
+    await page.goBack();
+    await page.locator('.plan-head h2', { hasText: '京都' }).waitFor();
+    await page.reload();
+    await page.locator('.plan-head h2', { hasText: '京都' }).waitFor();
+    assert.equal(await page.locator('article.day:visible').count(), 3);
+
+    // 点标志同样回到输入页；不存在的行程编号直接回到输入页。
+    await page.getByRole('link', { name: /AItour/ }).click();
+    await page.getByRole('heading', { name: '想去哪里？' }).waitFor();
+    await page.goto(`${baseUrl}/?trip=99999`);
+    await page.getByRole('heading', { name: '想去哪里？' }).waitFor();
+    assert.equal(new URL(page.url()).search, '');
     assert.deepEqual(errors, []);
   } finally {
     await context.close();
@@ -263,12 +371,17 @@ test('移动端：无横向滚动，地图固定在顶部，行程可读', async
   const { page, context, errors } = await openPage({ viewport: { width: 390, height: 844 }, isMobile: true });
   try {
     await page.getByRole('heading', { name: '想去哪里？' }).waitFor();
+    // 还没有行程时不显示空地图；触屏上不提示 Ctrl + Enter。
+    assert.equal(await page.locator('.map-pane').isVisible(), false);
+    assert.equal(await page.locator('.kbd-hint').isVisible(), false);
     await shot(page, '05-home-mobile');
     await generate(page, '东京五日游，带小孩，想去迪士尼、浅草寺、秋叶原、台场，预算中等');
     await page.locator('.plan-head h2').waitFor({ timeout: 20000 });
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
     assert.ok(overflow <= 0, `页面不应横向滚动（溢出 ${overflow}px）`);
     assert.ok(await page.locator('.stop', { hasText: '东京迪士尼乐园' }).count() > 0);
+    assert.ok(await page.locator('.map-pane').isVisible());
+    assert.ok(await page.getByRole('button', { name: '新行程' }).isVisible());
     await page.mouse.wheel(0, 900);
     const mapBox = await page.locator('.map-pane').boundingBox();
     assert.ok(mapBox && mapBox.y >= 0 && mapBox.y < 120, '滚动后地图仍固定在顶部');
@@ -286,7 +399,7 @@ test('地图脚本无法加载时降级：显示提示，行程照常可用', as
     assert.match(await page.locator('.map-fallback').textContent(), /地图暂不可用/);
     await generate(page, '京都三天');
     await page.locator('.plan-head h2').waitFor({ timeout: 15000 });
-    assert.equal(await page.locator('article.day').count(), 3);
+    assert.equal(await page.locator('article.day:visible').count(), 3);
     await shot(page, '07-map-unavailable');
     assert.deepEqual(errors.filter(item => !/maps\.googleapis|Failed to load resource|could not load/i.test(item)), []);
   } finally {

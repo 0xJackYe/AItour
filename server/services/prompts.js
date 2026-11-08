@@ -1,6 +1,6 @@
 // 所有大模型提示词集中管理，便于版本化与评估。修改提示词时同步更新 PROMPT_VERSION。
 
-export const PROMPT_VERSION = '2026-11-07.5';
+export const PROMPT_VERSION = '2026-11-08.1';
 
 export const PLAN_SCHEMA = `{
   "status": "success | need_clarification",
@@ -19,6 +19,7 @@ export const PLAN_SCHEMA = `{
     },
     "destinations": [{ "city": "城市", "country": "国家", "start_day": 1, "end_day": 3 }],
     "accommodations": [{ "city": "城市", "country": "国家", "area": "住宿区域", "reason": "推荐理由（不超过 50 字）", "landmark": "该区域内可在地图上搜索到的车站或地标", "price_hint": "约 600-900 元/晚" }],
+    "transfers": [{ "day": 4, "from_city": "札幌", "to_city": "函馆", "mode": "train | flight | bus | drive | ferry", "service": "具体车次、航班或道路，如“JR 特急北斗号”“G30 连霍高速”", "from_place": "出发车站 / 机场 / 码头", "to_place": "到达车站 / 机场 / 码头", "depart_time": "08:00", "arrive_time": "11:45", "duration_hours": 3.75, "cost": "每人约 9000 日元", "tips": "订票、换乘或路况建议（不超过 50 字）", "round_trip": false }],
     "budget_estimate": {
       "currency": "CNY",
       "per_person": 4500,
@@ -57,8 +58,8 @@ const SHARED_RULES = `1. 天数：daily_plans 必须从 Day 1 连续覆盖到总
 5. 用户点名的地点、城市、国家和体验必须全部安排；多国路线遵守用户指定的起点、终点和交通方式。
 6. 顺路与时间：同一天的 spots 按地理位置顺路排列，尽量减少折返；每个 spot 填写 start_time（24 小时制 HH:MM），按顺序递增，并为前后两站留出路上时间；夜景、日出、演出等安排在对应时段。
 7. 节奏：relaxed 每天 2-3 个主要景点（约 9:30 后出发、21:00 前结束），moderate 3-4 个，intensive 4-6 个；用户未说明时按 moderate。主题乐园、一日游等全天型景点当天可以只安排这一处。
-8. 吃饭：每天安排午餐和晚餐，作为 type=restaurant 的 spot，写具体店名或美食街（主题乐园、景区内也写园内具体餐厅名），cost 写人均消费；用户关注美食时可以再加小吃、甜品或咖啡。
-9. 换城市的日子：把出发和到达的车站或机场作为 type=transport 的 spot，description 写清交通方式与车程（如“乘新干线约 2 小时 15 分到京都”），让时间线连贯。
+8. 吃饭：每天安排午餐和晚餐，作为 type=restaurant 的 spot，写具体店名或美食街（主题乐园、景区内也写园内具体餐厅名），cost 写人均消费；餐厅选在前后两站附近（步行约 15 分钟内），用户点名的除外；用户关注美食时可以再加小吃、甜品或咖啡。
+9. 换城市：每次换城市（包括一日游当天往返）都在 transfers 里写一条：发生在第几天、交通方式、具体车次 / 航班 / 道路、出发与到达的车站或机场、出发与到达时刻、时长、每人票价和订票建议；一日游写 round_trip=true；自驾写主要道路；单城市行程 transfers 为空数组。当天的 spots 里同样把出发和到达的车站或机场作为 type=transport 的 spot，时间与 transfers 一致，让时间线连贯。
 10. 住宿：accommodations 覆盖每个需要过夜的城市；landmark 写该区域内可以搜索到的车站或地标；price_hint 写每晚参考价。
 11. 费用：cost 用当地货币并标“约”，免费写“免费”；budget_estimate 用人民币估算每人费用（不含往返大交通），breakdown 各项之和等于 per_person。
 12. 预订：booking_tips 只列真正需要提前预约或购票的项目（热门景点时段票、演出、热门餐厅、季节性开放的道路等）。
@@ -80,7 +81,7 @@ JSON 顶层和 plan 元数据遵循下面结构：
 ${PLAN_SCHEMA}
 
 这是骨架阶段：daily_plans 中每个 spot 只输出 name、name_en、city、country、type 五个字段；transport_notes 只写一句。
-骨架只列景点、街区和换城市时的车站；午餐和晚餐不要列（下一阶段会按时间和位置补充具体餐厅）。plan 层面的 accommodations、budget_estimate、booking_tips 需要完整给出。
+骨架只列景点、街区和换城市时的车站；午餐和晚餐不要列（下一阶段会按时间和位置补充具体餐厅）。plan 层面的 accommodations、transfers、budget_estimate、booking_tips 需要完整给出。
 
 规则：
 ${SHARED_RULES}

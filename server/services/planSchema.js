@@ -169,6 +169,94 @@ function normalizeDestinations(value) {
     .sort((a, b) => a.start_day - b.start_day);
 }
 
+// ───────────────────────────── 城市间交通 ─────────────────────────────
+
+export const TRANSFER_MODES = ['train', 'flight', 'bus', 'drive', 'ferry'];
+
+const TRANSFER_MODE_ALIASES = {
+  train: 'train', rail: 'train', railway: 'train', high_speed_rail: 'train', hsr: 'train', shinkansen: 'train', metro: 'train',
+  火车: 'train', 高铁: 'train', 动车: 'train', 新干线: 'train', 铁路: 'train', 列车: 'train', 电车: 'train',
+  flight: 'flight', plane: 'flight', air: 'flight', airplane: 'flight', fly: 'flight', 飞机: 'flight', 航班: 'flight',
+  bus: 'bus', coach: 'bus', 大巴: 'bus', 巴士: 'bus', 长途汽车: 'bus', 客车: 'bus',
+  drive: 'drive', car: 'drive', driving: 'drive', self_drive: 'drive', taxi: 'drive',
+  自驾: 'drive', 驾车: 'drive', 开车: 'drive', 包车: 'drive', 租车: 'drive', 打车: 'drive',
+  ferry: 'ferry', boat: 'ferry', ship: 'ferry', 轮渡: 'ferry', 渡轮: 'ferry', 渡船: 'ferry', 船: 'ferry',
+};
+
+export function transferMode(value) {
+  return enumValue(value, TRANSFER_MODE_ALIASES, null);
+}
+
+/** 城市名比较用的键：去掉“市 / 都 / 府 / 县”等后缀、大小写与标点（“京都”“成都”保持原样）。 */
+export function cityKey(value) {
+  const base = text(value, 60).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const stripped = base.replace(/(?:特别行政区|自治区|自治州|地区|市|都|府|县|州|省)$/u, '');
+  return [...stripped].length >= 2 ? stripped : base;
+}
+
+export function sameCity(left, right) {
+  const a = cityKey(left);
+  const b = cityKey(right);
+  return Boolean(a && b && a === b);
+}
+
+function transferMinutes(raw, departTime, arriveTime) {
+  const minutes = Number.parseFloat(raw?.duration_minutes);
+  const hours = Number.parseFloat(raw?.duration_hours);
+  let value = Number.isFinite(minutes) && minutes > 0 ? minutes : Number.isFinite(hours) && hours > 0 ? hours * 60 : null;
+  if (!value && departTime && arriveTime) {
+    const [dh, dm] = departTime.split(':').map(Number);
+    const [ah, am] = arriveTime.split(':').map(Number);
+    let diff = ah * 60 + am - (dh * 60 + dm);
+    if (diff <= 0) diff += 24 * 60; // 夜车 / 红眼航班跨过午夜
+    value = diff;
+  }
+  if (!value || value > 48 * 60) return null;
+  return Math.max(5, Math.round(value / 5) * 5);
+}
+
+/** 一条城市间交通。day 为发生在哪一天；round_trip 表示一日游当天往返。 */
+export function normalizeTransfer(raw, { maxDay = null } = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  const day = positiveInt(raw.day);
+  const fromCity = text(raw.from_city ?? raw.from, 40);
+  const toCity = text(raw.to_city ?? raw.to, 40);
+  if (!day || (maxDay && day > maxDay) || !fromCity || !toCity || sameCity(fromCity, toCity)) return null;
+  const departTime = normalizeClock(raw.depart_time);
+  const arriveTime = normalizeClock(raw.arrive_time);
+  return {
+    day,
+    from_city: fromCity,
+    to_city: toCity,
+    mode: transferMode(raw.mode),
+    service: text(raw.service, 60),
+    from_place: text(raw.from_place, 60),
+    to_place: text(raw.to_place, 60),
+    depart_time: departTime,
+    arrive_time: arriveTime,
+    duration_minutes: transferMinutes(raw, departTime, arriveTime),
+    cost: text(raw.cost, 40),
+    tips: text(raw.tips, 120),
+    round_trip: raw.round_trip === true || raw.round_trip === 'true',
+  };
+}
+
+export function normalizeTransfers(value, options = {}) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  return value
+    .map(item => normalizeTransfer(item, options))
+    .filter((item) => {
+      if (!item) return false;
+      const key = `${item.day}|${cityKey(item.from_city)}|${cityKey(item.to_city)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.day - b.day || String(a.depart_time || '').localeCompare(String(b.depart_time || '')))
+    .slice(0, 40);
+}
+
 function normalizeAccommodation(item, fallback = {}) {
   if (!item || typeof item !== 'object') return null;
   const area = text(item.area, 60);
@@ -224,6 +312,7 @@ export function normalizePlan(plan, { expectedDays = null } = {}) {
   const preferences = plan.preferences && typeof plan.preferences === 'object' ? plan.preferences : {};
   const declaredDays = positiveInt(plan.days);
   const lastDay = dailyPlans.length ? dailyPlans[dailyPlans.length - 1].day : 0;
+  const maxDay = expectedDays || Math.max(declaredDays || 0, lastDay) || null;
 
   // 只输出白名单字段：模型额外生成的任意字段不会进入 API 响应与本地存储。
   return {
@@ -241,6 +330,7 @@ export function normalizePlan(plan, { expectedDays = null } = {}) {
     destinations,
     accommodations,
     accommodation: accommodations[0] || null,
+    transfers: normalizeTransfers(plan.transfers, { maxDay }),
     daily_plans: dailyPlans,
     budget_estimate: normalizeBudget(plan.budget_estimate),
     booking_tips: stringList(plan.booking_tips, { max: 5, length: 80 }),
@@ -303,9 +393,9 @@ export function deterministicWarnings(plan) {
   const limit = PACE_LIMITS[plan?.preferences?.pace] || PACE_LIMITS.moderate;
   for (const day of plan?.daily_plans || []) {
     const main = (day.spots || []).filter(spot => spot.type !== 'restaurant' && spot.type !== 'transport').length;
-    if (main > limit) warnings.push(`Day ${day.day} 安排了 ${main} 个主要地点，节奏可能偏紧`);
+    if (main > limit) warnings.push(`第 ${day.day} 天安排了 ${main} 个主要地点，节奏可能偏紧`);
     const hours = (day.spots || []).reduce((sum, spot) => sum + (spot.duration_hours || 0), 0);
-    if (hours > 11) warnings.push(`Day ${day.day} 建议停留时间合计约 ${hours} 小时，可能过满`);
+    if (hours > 11) warnings.push(`第 ${day.day} 天建议停留时间合计约 ${hours} 小时，可能过满`);
   }
   const stayCities = new Set((plan?.accommodations || []).map(item => item.city));
   for (const destination of plan?.destinations || []) {
@@ -318,7 +408,7 @@ export function deterministicWarnings(plan) {
     for (const spot of day.spots || []) {
       const key = spotKey(spot);
       if (seen.has(key) && seen.get(key) !== day.day) {
-        warnings.push(`“${spot.name}”在 Day ${seen.get(key)} 和 Day ${day.day} 重复出现`);
+        warnings.push(`“${spot.name}”在第 ${seen.get(key)} 天和第 ${day.day} 天重复出现`);
       } else {
         seen.set(key, day.day);
       }

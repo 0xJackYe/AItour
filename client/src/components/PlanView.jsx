@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { BUDGET_LABELS, PACE_LABELS, TRANSPORT_LABELS, describeBudget } from '../lib/format.js';
 import { markdownToPlainText, planToMarkdown } from '../lib/markdown.js';
 import { accommodationsOf, dayColor, isGroundingAvailable, planTitle } from '../lib/plan.js';
+import { cityGroups, dayRangeLabel, describeTransfer, routeOutline, visibleDays as daysInView } from '../lib/trip.js';
 import DaySection from './DaySection.jsx';
 import Icon from './Icon.jsx';
 import QualityNotice from './QualityNotice.jsx';
@@ -106,33 +107,123 @@ async function copyText(value) {
   return copied;
 }
 
-function DayFilter({ days, selected, onSelect }) {
+// 多城市行程：第一行“总览 + 城市”，选中城市后第二行是这个城市的每一天；
+// 单城市行程只有“全部 + 每一天”一行。
+function ViewFilter({ groups, days, view, onViewChange }) {
+  const multiCity = groups.length > 1;
+  const activeGroup = multiCity ? groups.find(group => group.key === view.city) : groups[0];
+  const dayList = activeGroup ? days.filter(day => activeGroup.days.includes(day.day)) : [];
+  const cityKeyOf = dayNumber => groups.find(group => group.days.includes(dayNumber))?.key ?? null;
   return (
-    <div className="day-filter" role="group" aria-label="按天查看">
-      <button type="button" className="filter-chip" aria-pressed={selected === null} onClick={() => onSelect(null)}>
-        全部
-      </button>
-      {days.map(day => (
-        <button
-          key={day.day}
-          type="button"
-          className="filter-chip"
-          aria-pressed={selected === day.day}
-          style={{ '--day-color': dayColor(day.day) }}
-          onClick={() => onSelect(selected === day.day ? null : day.day)}
-        >
-          <span className="filter-dot" aria-hidden="true" />
-          第 {day.day} 天
-        </button>
-      ))}
+    <div className="day-filter" role="group" aria-label={multiCity ? '按城市和天查看' : '按天查看'}>
+      {multiCity && (
+        <div className="filter-row">
+          <button type="button" className="filter-chip" aria-pressed={view.city === null && view.day === null} onClick={() => onViewChange({ city: null, day: null })}>
+            <Icon name="route" size={16} />
+            总览
+          </button>
+          {groups.map(group => (
+            <button
+              key={group.key}
+              type="button"
+              className="filter-chip"
+              aria-pressed={view.city === group.key && view.day === null}
+              onClick={() => onViewChange({ city: group.key, day: null })}
+            >
+              {group.name}
+              <span className="chip-count">{group.days.length} 天</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {dayList.length > 1 && (
+        <div className="filter-row">
+          <button
+            type="button"
+            className="filter-chip"
+            aria-pressed={view.day === null && (!multiCity || view.city !== null)}
+            onClick={() => onViewChange({ city: multiCity ? activeGroup.key : null, day: null })}
+          >
+            {multiCity ? `${activeGroup.name}全部` : '全部'}
+          </button>
+          {dayList.map(day => (
+            <button
+              key={day.day}
+              type="button"
+              className="filter-chip"
+              aria-pressed={view.day === day.day}
+              style={{ '--day-color': dayColor(day.day) }}
+              onClick={() => onViewChange(view.day === day.day
+                ? { city: multiCity ? cityKeyOf(day.day) : null, day: null }
+                : { city: multiCity ? cityKeyOf(day.day) : null, day: day.day })}
+            >
+              <span className="filter-dot" aria-hidden="true" />
+              第 {day.day} 天
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-export default function PlanView({ result, selectedDay, onSelectDay, onFocusSpot, focusedId }) {
+// 城市之间怎么走：城市段与城市间交通按时间顺序排列，点城市看城市内路线，点交通看这段路线。
+function RouteCard({ plan, transfers, onViewChange, onFocusTransfer }) {
+  const items = routeOutline(plan, transfers);
+  return (
+    <section className="route-card" aria-label="城市间路线">
+      <h3><Icon name="route" size={18} />路线</h3>
+      <ol className="route-list">
+        {items.map((item) => {
+          if (item.type === 'city') {
+            return (
+              <li key={`city-${item.run.key}-${item.run.days[0]}`} className="route-city">
+                <button type="button" onClick={() => onViewChange({ city: item.run.key, day: null })}>
+                  <span className="route-dot" aria-hidden="true" />
+                  <strong>{item.run.name}</strong>
+                  <span className="route-days">{dayRangeLabel(item.run.days)}</span>
+                </button>
+              </li>
+            );
+          }
+          const info = describeTransfer(item.transfer);
+          return (
+            <li key={item.transfer.id || `${item.transfer.day}-${item.transfer.to_city}`} className="route-transfer">
+              <button type="button" onClick={() => onFocusTransfer(item.transfer)} title="在地图上查看这段路线">
+                <Icon name={info.icon} size={16} />
+                <span className="route-transfer-main">
+                  {info.roundTrip ? `${info.title} · ` : ''}{info.service}{info.duration ? ` · ${info.duration}` : ''}
+                </span>
+                <span className="route-transfer-meta">
+                  {[`第 ${item.transfer.day} 天`, item.transfer.cost].filter(Boolean).join(' · ')}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+const NO_TRANSFERS = [];
+
+export default function PlanView({ result, view, onViewChange, onFocusSpot, onFocusTransfer, focus }) {
   const { plan, routes, parsedRequest, transitMarkers } = result;
+  const transfers = result.transfers || NO_TRANSFERS;
   const days = plan.daily_plans || [];
-  const visibleDays = selectedDay === null ? days : days.filter(day => day.day === selectedDay);
+  const groups = useMemo(() => cityGroups(plan), [plan]);
+  const visible = useMemo(() => new Set(daysInView(plan, view).map(day => day.day)), [plan, view]);
+  // 每天的城际交通与路线按天预先分组，保证属性引用稳定，DaySection 才能跳过重渲染。
+  const byDay = useMemo(() => {
+    const map = new Map(days.map(day => [day.day, { route: undefined, transfers: NO_TRANSFERS }]));
+    for (const route of routes || []) if (map.has(route.day)) map.get(route.day).route = route;
+    for (const transfer of transfers) {
+      const entry = map.get(transfer.day);
+      if (entry) entry.transfers = entry.transfers === NO_TRANSFERS ? [transfer] : [...entry.transfers, transfer];
+    }
+    return map;
+  }, [days, routes, transfers]);
   const preference = parsedRequest?.constraints?.transport || plan.preferences?.transport;
   const accommodations = accommodationsOf(plan);
   const groundingAvailable = isGroundingAvailable(result);
@@ -150,8 +241,8 @@ export default function PlanView({ result, selectedDay, onSelectDay, onFocusSpot
   };
 
   const handlePrint = () => {
-    // 打印完整行程：取消按天筛选并展开折叠内容。
-    onSelectDay(null);
+    // 打印完整行程：回到总览并展开折叠内容。
+    onViewChange({ city: null, day: null });
     setTimeout(() => {
       document.querySelectorAll('.plan details').forEach((element) => {
         element.open = true;
@@ -183,21 +274,29 @@ export default function PlanView({ result, selectedDay, onSelectDay, onFocusSpot
 
       <QualityNotice result={result} />
 
+      {(groups.length > 1 || transfers.length > 0) && (
+        <RouteCard plan={plan} transfers={transfers} onViewChange={onViewChange} onFocusTransfer={onFocusTransfer} />
+      )}
+
       <TripPrep plan={plan} accommodations={accommodations} transitMarkers={transitMarkers || []} />
 
-      {days.length > 1 && <DayFilter days={days} selected={selectedDay} onSelect={onSelectDay} />}
+      {days.length > 1 && <ViewFilter groups={groups} days={days} view={view} onViewChange={onViewChange} />}
 
+      {/* 所有天都保持挂载，切换视图只改 hidden：长行程切换城市 / 天时不需要重建整段列表。 */}
       <div className="days">
-        {visibleDays.map(day => (
-          <DaySection
-            key={day.day}
-            day={day}
-            route={routes.find(route => route.day === day.day)}
-            preference={preference}
-            onFocusSpot={onFocusSpot}
-            focusedId={focusedId}
-            groundingAvailable={groundingAvailable}
-          />
+        {days.map(day => (
+          <div key={day.day} className="day-slot" hidden={!visible.has(day.day)}>
+            <DaySection
+              day={day}
+              route={byDay.get(day.day)?.route}
+              transfers={byDay.get(day.day)?.transfers || NO_TRANSFERS}
+              preference={preference}
+              onFocusSpot={onFocusSpot}
+              onFocusTransfer={onFocusTransfer}
+              focusedId={focus?.type === 'spot' && focus.day === day.day ? focus.id : null}
+              groundingAvailable={groundingAvailable}
+            />
+          </div>
         ))}
       </div>
 

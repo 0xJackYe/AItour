@@ -68,3 +68,30 @@ test('整份计划逐日优化并返回每天的结果', () => {
   assert.equal(results.get(2).optimized, false);
   assert.deepEqual(optimized.daily_plans[0].spots.map(spot => spot.name), ['A', 'B', 'C', 'D']);
 });
+
+test('“早上人少”“开门时间”这类建议不算时段要求；车站与晚间安排固定不动', () => {
+  const advice = at('景点', 35.0, 135.7, { start_time: '10:00', tips: '早上人少，开门时间 6:00', description: '傍晚灯笼亮起后氛围更佳' });
+  assert.equal(isPinned(advice), false);
+  const sunset = at('展望台', 35.0, 135.7, { start_time: '16:30', description: '适合看日落和夜景' });
+  assert.equal(isPinned(sunset), true);
+  const evening = at('步行街', 35.0, 135.7, { start_time: '18:30' });
+  assert.equal(isPinned(evening), true);
+  const station = at('京都站', 35.0, 135.7, { type: 'transport', start_time: '09:00' });
+  assert.equal(isPinned(station), true);
+});
+
+test('介绍写得很详细的一天仍然可以去掉折返（锦市场 → 岚山 → 市中心 → 金阁寺）', () => {
+  const tips = '早上人少，开放时间约 9:00-17:00';
+  const day = [
+    at('锦市场', 35.005, 135.7649, { start_time: '09:30', tips }),
+    at('岚山竹林', 35.017, 135.6713, { start_time: '11:00', tips }),
+    at('本家尾张屋', 35.0127, 135.7584, { start_time: '12:30', type: 'restaurant', tips }),
+    at('金阁寺', 35.0394, 135.7292, { start_time: '14:30', tips }),
+    at('奥丹清水', 34.9967, 135.7817, { start_time: '18:30', type: 'restaurant', tips }),
+  ];
+  const result = optimizeDayOrder(day);
+  assert.equal(result.optimized, true);
+  assert.deepEqual(result.spots.map(item => item.name), ['岚山竹林', '金阁寺', '本家尾张屋', '锦市场', '奥丹清水']);
+  assert.deepEqual(result.spots.map(item => item.start_time), ['09:30', '11:00', '12:30', '14:30', '18:30']);
+  assert.ok(pathLengthKm(result.spots) < pathLengthKm(day) * 0.6);
+});

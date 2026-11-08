@@ -91,7 +91,8 @@ test('确定性检查：节奏过满与跨天重复', () => {
     ],
   });
   const warnings = deterministicWarnings(plan);
-  assert.ok(warnings.some(item => item.includes('Day 1') && item.includes('偏紧')));
+  assert.ok(warnings.some(item => item.includes('第 1 天') && item.includes('偏紧')));
+  assert.ok(warnings.some(item => item.includes('第 1 天和第 2 天重复出现')));
   assert.ok(warnings.some(item => item.includes('重复')));
 });
 

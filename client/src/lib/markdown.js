@@ -13,6 +13,13 @@ import {
   formatHours,
 } from './format.js';
 import { accommodationsOf, isGroundingAvailable, legsByOrigin, planTitle, summarizeQuality } from './plan.js';
+import { describeTransfer, transfersOnDay } from './trip.js';
+
+function transferLine(transfer) {
+  const info = describeTransfer(transfer);
+  const details = [info.times, info.route].filter(Boolean).join('；');
+  return `${info.title}：${[info.service, ...info.facts].join(' · ')}${details ? `（${details}）` : ''}`;
+}
 
 function factsLine(plan, parsedRequest) {
   const preferences = plan.preferences || {};
@@ -79,6 +86,16 @@ export function planToMarkdown(result) {
     out.push('');
   }
 
+  const transfers = result.transfers || plan.transfers || [];
+  if (transfers.length) {
+    out.push('## 城市间交通', '');
+    for (const transfer of transfers) {
+      out.push(`- 第 ${transfer.day} 天 · ${transferLine(transfer)}`);
+      if (transfer.tips) out.push(`  提示：${transfer.tips}`);
+    }
+    out.push('');
+  }
+
   for (const day of plan.daily_plans || []) {
     const route = routes.find(item => item.day === day.day);
     out.push(`## 第 ${day.day} 天 · ${day.theme || day.city || ''}`.trimEnd(), '');
@@ -90,6 +107,10 @@ export function planToMarkdown(result) {
     if (meta.length) out.push(`*${meta.join(' · ')}*`, '');
 
     const legs = legsByOrigin(route);
+    // 从住宿出发或一日游往返的城际交通放在当天开头。
+    for (const transfer of transfersOnDay(transfers, day.day).filter(item => !item.attached_leg)) {
+      out.push(`城际交通：${transferLine(transfer)}`, '');
+    }
     (day.spots || []).forEach((spot, index) => {
       out.push(stopLine(index + 1, spot, { flagUnlocated: groundingAvailable }));
       if (spot.description) out.push(`   ${spot.description}`);

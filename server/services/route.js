@@ -14,8 +14,8 @@ import { computeRoute } from './google.js';
 export const WALK_MAX_KM = 1.5;
 const WALK_PREFERRED_MAX_KM = 2.5;
 const WALK_FALLBACK_MAX_KM = 4;
-const BASE_FIELDS = 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline';
-const TRANSIT_FIELDS = [
+export const BASE_FIELDS = 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline';
+export const TRANSIT_FIELDS = [
   BASE_FIELDS,
   'routes.legs.steps.travelMode',
   'routes.legs.steps.transitDetails.transitLine.name',
@@ -44,13 +44,13 @@ function waypoint({ lat, lng }) {
   return { location: { latLng: { latitude: Number(lat.toFixed(6)), longitude: Number(lng.toFixed(6)) } } };
 }
 
-function parseDuration(duration) {
+export function parseDuration(duration) {
   if (!duration) return null;
   const seconds = Number(String(duration).replace(/s$/, ''));
   return Number.isFinite(seconds) ? seconds : null;
 }
 
-function transitLines(route) {
+export function transitLines(route) {
   const seen = new Set();
   const lines = [];
   for (const leg of route.legs || []) {
@@ -66,7 +66,7 @@ function transitLines(route) {
   return lines.slice(0, 4);
 }
 
-function requestBody(from, to, mode) {
+export function requestBody(from, to, mode) {
   const body = {
     origin: waypoint(from),
     destination: waypoint(to),
@@ -147,14 +147,24 @@ function sumOrNull(values) {
   return known.length ? known.reduce((sum, value) => sum + value, 0) : null;
 }
 
-/** 为每天计算逐段路线。optimizations 来自 optimizePlanOrder。 */
-export async function computeRoutes(plan, { preference = 'public_transit', optimizations = new Map() } = {}) {
+/**
+ * 为每天计算逐段路线。optimizations 来自 optimizePlanOrder；transfers 来自
+ * routeTransfers：出发站与到达站是当天相邻两站的城市间交通，直接作为这一段路程。
+ */
+export async function computeRoutes(plan, { preference = 'public_transit', optimizations = new Map(), transfers = [], transferLeg = null } = {}) {
   const days = plan.daily_plans || [];
+  const attached = new Map();
+  for (const transfer of transfers || []) {
+    if (transfer.attached_leg && transferLeg) attached.set(`${transfer.day}|${transfer.attached_leg.from_id}|${transfer.attached_leg.to_id}`, transfer);
+  }
   const legJobs = days.flatMap((day) => {
     const located = (day.spots || []).filter(spot => spot.coordinates);
     return located.slice(1).map((spot, index) => ({ day: day.day, from: located[index], to: spot }));
   });
-  const legs = await mapWithConcurrency(legJobs, 6, job => computeLeg(job.from, job.to, { preference }));
+  const legs = await mapWithConcurrency(legJobs, 6, (job) => {
+    const transfer = attached.get(`${job.day}|${job.from.location_id}|${job.to.location_id}`);
+    return transfer ? transferLeg(transfer) : computeLeg(job.from, job.to, { preference });
+  });
   const legsByDay = new Map();
   legJobs.forEach((job, index) => {
     if (!legsByDay.has(job.day)) legsByDay.set(job.day, []);

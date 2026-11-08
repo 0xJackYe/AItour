@@ -23,6 +23,8 @@ export function toClock(minutes) {
 
 const roundUp5 = minutes => Math.ceil(minutes / 5) * 5;
 const stayMinutes = spot => Math.round((spot?.duration_hours || DEFAULT_STAY_HOURS) * 60);
+// 乘城际列车 / 航班时，出发站的时间就是发车时间：不再叠加“在车站停留”的时长。
+const dwellBefore = (spot, leg) => (leg?.mode === 'TRANSFER' ? 0 : stayMinutes(spot));
 
 function legBetween(from, to, legs) {
   const leg = from?.location_id ? legs?.get(from.location_id) : null;
@@ -51,7 +53,8 @@ export function scheduleDay(spots = [], { pace = 'moderate', legs = null } = {})
     let cursor = parsed.find(value => value !== null) ?? DAY_START[pace] ?? DAY_START.moderate;
     times = spots.map((spot, index) => {
       if (index > 0) {
-        cursor += stayMinutes(spots[index - 1]) + transferMinutes(legBetween(spots[index - 1], spot, legs));
+        const leg = legBetween(spots[index - 1], spot, legs);
+        cursor += dwellBefore(spots[index - 1], leg) + transferMinutes(leg);
         cursor = roundUp5(cursor);
       }
       return cursor;
@@ -64,7 +67,7 @@ export function scheduleDay(spots = [], { pace = 'moderate', legs = null } = {})
     for (let index = 1; index < spots.length; index++) {
       const leg = legBetween(spots[index - 1], spots[index], legs);
       if (leg && Number.isFinite(leg.duration_seconds)) {
-        const earliest = times[index - 1] + stayMinutes(spots[index - 1]) + Math.ceil(leg.duration_seconds / 60);
+        const earliest = times[index - 1] + dwellBefore(spots[index - 1], leg) + Math.ceil(leg.duration_seconds / 60);
         if (times[index] < earliest - FEASIBILITY_TOLERANCE_MINUTES) {
           times[index] = roundUp5(earliest);
           shifted++;
@@ -92,7 +95,7 @@ export function applySchedules(plan, routes = []) {
     const legs = new Map((route?.legs || []).filter(leg => leg.from_id).map(leg => [leg.from_id, leg]));
     const result = scheduleDay(day.spots || [], { pace, legs });
     if (result.endsAt !== null && result.endsAt > LATE_END_MINUTES) {
-      warnings.push(`Day ${day.day} 预计 ${toClock(result.endsAt)} 才结束，安排偏满`);
+      warnings.push(`第 ${day.day} 天预计 ${toClock(result.endsAt)} 才结束，安排偏满`);
     }
     return { ...day, spots: result.spots };
   });
