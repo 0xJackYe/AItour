@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "ai",
+  "main": "server/worker.js",
+  "compatibility_date": "2026-11-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": {
+    "binding": "AI"
+  },
+  "assets": {
+    "directory": "./client/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "vars": {
+    "NODE_ENV": "production",
+    "DEEPSEEK_MODEL": "deepseek-chat",
+    "WORKERS_AI_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "PLAN_RATE_LIMIT": "10",
+    "PLAN_RATE_WINDOW_MS": "900000",
+    "TRUST_PROXY": "1",
+    "SERVE_CLIENT": "false"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

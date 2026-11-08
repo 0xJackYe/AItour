@@ -6,6 +6,7 @@ import { currentSignal } from '../lib/context.js';
 import { isAbortError } from '../lib/errors.js';
 import { log } from '../lib/log.js';
 import { requestJson } from './llm.js';
+import { hasWorkersAI } from './workersAi.js';
 import { planOutline, text } from './planSchema.js';
 import { VERIFY_SYSTEM_PROMPT } from './prompts.js';
 
@@ -39,7 +40,7 @@ export function normalizeVerification(parsed) {
 }
 
 export async function verifyPlan(userQuery, plan) {
-  if (!getConfig().llm.apiKey) return skippedVerification();
+  if (!getConfig().llm.apiKey && !hasWorkersAI()) return skippedVerification();
   const userMessage = `【用户原始需求】\n${userQuery}\n\n【已生成的旅行计划】\n${JSON.stringify(planOutline(plan))}`;
   try {
     const parsed = await requestJson(VERIFY_SYSTEM_PROMPT, userMessage, {

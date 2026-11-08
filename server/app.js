@@ -10,10 +10,16 @@ import { getConfig } from './config.js';
 import { AppError, toPublicError } from './lib/errors.js';
 import { log } from './lib/log.js';
 import { createPlanRouter } from './routes/plan.js';
+import { hasWorkersAI } from './services/workersAi.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+// Cloudflare 的 Node HTTP 兼容层在 bundle 中不保证提供 import.meta.url。
+// Worker 不直接托管静态文件，但仍需给应用工厂一个安全的默认目录。
+const moduleUrl = import.meta.url;
+const __dirname = typeof moduleUrl === 'string' && moduleUrl
+  ? dirname(fileURLToPath(moduleUrl))
+  : resolve(process.cwd(), 'server');
 export const CLIENT_DIST = resolve(__dirname, '..', 'client', 'dist');
-export const BUILD_TAG = 'v5-reliable-pipeline-2026-11-07';
+export const BUILD_TAG = 'v6-human-usable-cloudflare-2026-11-08';
 
 function parseTrustProxy(value) {
   if (value === 'true') return true;
@@ -80,7 +86,8 @@ export function createApp({ config = getConfig(), clientDist = CLIENT_DIST } = {
       status: 'ok',
       version: BUILD_TAG,
       uptime_s: Math.round(process.uptime()),
-      llm_configured: Boolean(current.llm.apiKey),
+      llm_configured: Boolean(current.llm.apiKey) || hasWorkersAI(),
+      llm_fallback_configured: hasWorkersAI(),
       maps_configured: Boolean(current.google.apiKey),
       timestamp: new Date().toISOString(),
     });
@@ -105,7 +112,7 @@ export function createApp({ config = getConfig(), clientDist = CLIENT_DIST } = {
         if (filePath.includes(`${sep}assets${sep}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
       },
     }));
-    app.get('*', (req, res) => {
+    app.get('/{*splat}', (req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(resolve(clientDist, 'index.html'));
     });

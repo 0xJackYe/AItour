@@ -36,6 +36,7 @@ import {
   buildUserMessage,
   repairPrompt,
 } from './prompts.js';
+import { hasWorkersAI, requestWorkersAiCompletion } from './workersAi.js';
 
 export const LONG_TRIP_THRESHOLD_DAYS = 8;
 // 细化分段越小，模型越能稳定地写足细节；并发执行，总耗时基本不变。
@@ -53,6 +54,16 @@ const FALLBACK_TO_CHUNKED = new Set([
   'LLM_OUTPUT_INTERRUPTED',
   'LLM_MISSING_PLAN',
   'LLM_INCOMPLETE_PLAN',
+]);
+const WORKERS_AI_FALLBACK_CODES = new Set([
+  'CONFIG_MISSING',
+  'LLM_AUTH',
+  'LLM_QUOTA',
+  'LLM_RATE_LIMITED',
+  'LLM_UNAVAILABLE',
+  'LLM_TIMEOUT',
+  'LLM_STALLED',
+  'LLM_STREAM_INTERRUPTED',
 ]);
 
 export class LLMOutputError extends AppError {
@@ -217,6 +228,57 @@ function recordUsage(usage) {
   recordStat('llm_cache_hit_tokens', usage.prompt_cache_hit_tokens || 0);
 }
 
+async function workersAiFallback(error, { system, user, maxTokens, temperature, onDelta, purpose, signal }) {
+  if (!hasWorkersAI() || !WORKERS_AI_FALLBACK_CODES.has(error?.code) || signal?.aborted) throw error;
+  recordStat('llm_fallback_calls');
+  const started = Date.now();
+  log.warn('llm.fallback', { purpose, provider: 'workers-ai', code: error.code, message: error.message });
+  try {
+    const result = await withRetry(async () => {
+      try {
+        return await requestWorkersAiCompletion(system, user, { maxTokens, temperature, onDelta });
+      } catch (fallbackError) {
+        if (signal?.aborted) throw signal.reason || error;
+        throw new AppError('LLM_UNAVAILABLE', `Workers AI 调用失败: ${fallbackError?.message || fallbackError}`, {
+          status: 502,
+          retryable: true,
+          cause: fallbackError,
+        });
+      }
+    }, {
+      retries: 2,
+      baseDelayMs: 300,
+      maxDelayMs: 1500,
+      signal,
+      onRetry: (retryError, attempt, delay) => log.warn('llm.fallback_retry', {
+        purpose,
+        attempt,
+        delay_ms: Math.round(delay),
+        message: retryError.message,
+      }),
+    });
+    if (signal?.aborted) throw signal.reason || error;
+    recordUsage(result.usage);
+    log.info('llm.call', {
+      purpose,
+      provider: 'workers-ai',
+      ms: Date.now() - started,
+      finish: result.finishReason,
+      chars: result.content.length,
+      completion_tokens: result.usage?.completion_tokens,
+    });
+    return result;
+  } catch (fallbackError) {
+    if (signal?.aborted) throw signal.reason || error;
+    log.error('llm.fallback_failed', { purpose, message: fallbackError?.message });
+    throw new AppError('LLM_UNAVAILABLE', `主模型与后备模型均不可用: ${fallbackError?.message || fallbackError}`, {
+      status: 502,
+      retryable: true,
+      cause: fallbackError,
+    });
+  }
+}
+
 /** 一次 Chat Completions 调用（含传输层重试）。返回 { content, finishReason, usage }。 */
 export async function chatCompletion({
   system,
@@ -228,8 +290,13 @@ export async function chatCompletion({
   retries,
 } = {}) {
   const cfg = getConfig().llm;
-  if (!cfg.apiKey) throw new AppError('CONFIG_MISSING', '未配置 DEEPSEEK_API_KEY', { status: 503 });
   const signal = currentSignal();
+  if (!cfg.apiKey) {
+    return workersAiFallback(
+      new AppError('CONFIG_MISSING', '未配置 DEEPSEEK_API_KEY', { status: 503 }),
+      { system, user, maxTokens, temperature, onDelta, purpose, signal },
+    );
+  }
   const url = chatCompletionsUrl(cfg.baseUrl);
   const body = {
     model: cfg.model,
@@ -246,73 +313,77 @@ export async function chatCompletion({
     body.stream_options = { include_usage: true };
   }
 
-  return withRetry(async (attempt) => {
-    recordStat('llm_calls');
-    const started = Date.now();
-    const deadline = createDeadline({
-      parentSignal: signal,
-      timeoutMs: cfg.timeoutMs,
-      idleTimeoutMs: cfg.idleTimeoutMs,
-      onTimeout: () => new AppError('LLM_TIMEOUT', `LLM 请求超过 ${Math.round(cfg.timeoutMs / 1000)} 秒`, { status: 504 }),
-      onIdle: () => new AppError('LLM_STALLED', `LLM 超过 ${Math.round(cfg.idleTimeoutMs / 1000)} 秒无数据`, { status: 504, retryable: true }),
-    });
-    try {
-      let response;
+  try {
+    return await withRetry(async (attempt) => {
+      recordStat('llm_calls');
+      const started = Date.now();
+      const deadline = createDeadline({
+        parentSignal: signal,
+        timeoutMs: cfg.timeoutMs,
+        idleTimeoutMs: cfg.idleTimeoutMs,
+        onTimeout: () => new AppError('LLM_TIMEOUT', `LLM 请求超过 ${Math.round(cfg.timeoutMs / 1000)} 秒`, { status: 504 }),
+        onIdle: () => new AppError('LLM_STALLED', `LLM 超过 ${Math.round(cfg.idleTimeoutMs / 1000)} 秒无数据`, { status: 504, retryable: true }),
+      });
       try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: cfg.stream ? 'text/event-stream' : 'application/json',
-            Authorization: `Bearer ${cfg.apiKey}`,
-          },
-          body: JSON.stringify(body),
-          signal: deadline.signal,
+        let response;
+        try {
+          response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: cfg.stream ? 'text/event-stream' : 'application/json',
+              Authorization: `Bearer ${cfg.apiKey}`,
+            },
+            body: JSON.stringify(body),
+            signal: deadline.signal,
+          });
+        } catch (error) {
+          throw transportError(error, deadline);
+        }
+        deadline.touch();
+        if (!response.ok) {
+          const detail = await response.text().catch(() => '');
+          throw upstreamError(response.status, detail, parseRetryAfter(response.headers.get('retry-after')));
+        }
+        let result;
+        try {
+          result = (response.headers.get('content-type') || '').includes('text/event-stream')
+            ? await readEventStream(response, { onDelta, onActivity: deadline.touch })
+            : await readJsonBody(response);
+        } catch (error) {
+          throw transportError(error, deadline);
+        }
+        recordUsage(result.usage);
+        log.info('llm.call', {
+          purpose,
+          attempt,
+          ms: Date.now() - started,
+          finish: result.finishReason,
+          chars: result.content.length,
+          completion_tokens: result.usage?.completion_tokens,
         });
-      } catch (error) {
-        throw transportError(error, deadline);
+        // DeepSeek 在后端资源不足时会以该 finish_reason 结束，属于可重试的瞬时故障。
+        if (result.finishReason === 'insufficient_system_resource') {
+          throw new AppError('LLM_UNAVAILABLE', 'LLM 后端资源不足', { status: 502, retryable: true });
+        }
+        return result;
+      } finally {
+        deadline.dispose();
       }
-      deadline.touch();
-      if (!response.ok) {
-        const detail = await response.text().catch(() => '');
-        throw upstreamError(response.status, detail, parseRetryAfter(response.headers.get('retry-after')));
-      }
-      let result;
-      try {
-        result = (response.headers.get('content-type') || '').includes('text/event-stream')
-          ? await readEventStream(response, { onDelta, onActivity: deadline.touch })
-          : await readJsonBody(response);
-      } catch (error) {
-        throw transportError(error, deadline);
-      }
-      recordUsage(result.usage);
-      log.info('llm.call', {
+    }, {
+      retries: retries ?? cfg.maxRetries,
+      signal,
+      onRetry: (error, attempt, delay) => log.warn('llm.retry', {
         purpose,
         attempt,
-        ms: Date.now() - started,
-        finish: result.finishReason,
-        chars: result.content.length,
-        completion_tokens: result.usage?.completion_tokens,
-      });
-      // DeepSeek 在后端资源不足时会以该 finish_reason 结束，属于可重试的瞬时故障。
-      if (result.finishReason === 'insufficient_system_resource') {
-        throw new AppError('LLM_UNAVAILABLE', 'LLM 后端资源不足', { status: 502, retryable: true });
-      }
-      return result;
-    } finally {
-      deadline.dispose();
-    }
-  }, {
-    retries: retries ?? cfg.maxRetries,
-    signal,
-    onRetry: (error, attempt, delay) => log.warn('llm.retry', {
-      purpose,
-      attempt,
-      delay_ms: Math.round(delay),
-      code: error.code,
-      message: error.message,
-    }),
-  });
+        delay_ms: Math.round(delay),
+        code: error.code,
+        message: error.message,
+      }),
+    });
+  } catch (error) {
+    return workersAiFallback(error, { system, user, maxTokens, temperature, onDelta, purpose, signal });
+  }
 }
 
 /** 请求 JSON 输出并解析。截断、内容拦截等结束原因转为结构化错误。 */

@@ -4,7 +4,7 @@
 //   - 浏览器中的 Google Maps JS 由轻量桩脚本替代，以便断言标记与路线。
 // 运行：npm run build && npm run test:e2e
 // 依赖：Playwright（npm i -D playwright && npx playwright install chromium）。
-// 设置 E2E_SCREENSHOTS=目录 可保存截图。
+// 设置 E2E_SCREENSHOTS=目录 可保存截图；E2E_BROWSER_CHANNEL=chrome 可复用系统 Chrome。
 
 process.env.LOG_LEVEL ||= 'warn';
 
@@ -14,7 +14,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -26,10 +26,11 @@ try {
   process.exit(1);
 }
 
-const { createApp } = await import(join(root, 'server/app.js'));
-const { getConfig } = await import(join(root, 'server/config.js'));
-const { resetGoogleClient } = await import(join(root, 'server/services/google.js'));
-const { createMockUpstream } = await import(join(root, 'server/testing/mockUpstream.js'));
+const moduleHref = (...parts) => pathToFileURL(join(root, ...parts)).href;
+const { createApp } = await import(moduleHref('server', 'app.js'));
+const { getConfig } = await import(moduleHref('server', 'config.js'));
+const { resetGoogleClient } = await import(moduleHref('server', 'services', 'google.js'));
+const { createMockUpstream } = await import(moduleHref('server', 'testing', 'mockUpstream.js'));
 
 const clientDist = join(root, 'client/dist');
 if (!existsSync(join(clientDist, 'index.html'))) {
@@ -78,7 +79,12 @@ before(async () => {
     const instance = app.listen(0, '127.0.0.1', () => resolveServer(instance));
   });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
-  browser = await chromium.launch();
+  const browserChannel = String(process.env.E2E_BROWSER_CHANNEL || '').trim();
+  const browserPath = String(process.env.E2E_BROWSER_PATH || '').trim();
+  browser = await chromium.launch({
+    ...(browserChannel ? { channel: browserChannel } : {}),
+    ...(browserPath ? { executablePath: browserPath } : {}),
+  });
 });
 
 after(async () => {

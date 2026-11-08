@@ -13,6 +13,7 @@ import {
   requestedDaysFromText,
 } from '../services/llm.js';
 import { llmPurpose } from '../testing/mockUpstream.js';
+import { configureWorkersAI } from '../services/workersAi.js';
 
 const COMPLEX_QUERY = '我想去塞尔维亚，波黑，克罗地亚，意大利，瑞士，法国。帮我设计一个完整的旅游路线，总时长28天，预算中等，旅行节奏轻松，塞尔维亚开始，法国结束，欧洲内部交通用火车';
 
@@ -263,6 +264,62 @@ test('401 鉴权失败不重试', async () => {
     await assert.rejects(chatCompletion({ system: 's', user: 'u' }), { code: 'LLM_AUTH' });
     assert.equal(calls, 1);
   });
+});
+
+test('DeepSeek 余额不足时使用 Workers AI 后备模型', async () => {
+  let fallbackCalls = 0;
+  configureWorkersAI({
+    async run() {
+      fallbackCalls++;
+      return {
+        response: { ok: true, provider: 'workers-ai' },
+        usage: { prompt_tokens: 4, completion_tokens: 6 },
+      };
+    },
+  });
+  try {
+    await withFetch(async () => new Response('insufficient balance', { status: 402 }), async () => {
+      const result = await chatCompletion({ system: 's', user: 'u' });
+      assert.deepEqual(JSON.parse(result.content), { ok: true, provider: 'workers-ai' });
+      assert.equal(result.finishReason, 'stop');
+      assert.equal(fallbackCalls, 1);
+    });
+  } finally {
+    configureWorkersAI(null);
+  }
+});
+
+test('DeepSeek 鉴权失败时使用 Workers AI，并重试一次瞬时错误', async () => {
+  let fallbackCalls = 0;
+  configureWorkersAI({
+    async run() {
+      fallbackCalls++;
+      if (fallbackCalls === 1) throw new Error('temporary workers ai error');
+      return { response: '{"ok":true,"provider":"workers-ai"}' };
+    },
+  });
+  try {
+    await withFetch(async () => new Response('invalid key', { status: 401 }), async () => {
+      const result = await chatCompletion({ system: 's', user: 'u' });
+      assert.deepEqual(JSON.parse(result.content), { ok: true, provider: 'workers-ai' });
+      assert.equal(fallbackCalls, 2);
+    });
+  } finally {
+    configureWorkersAI(null);
+  }
+});
+
+test('未配置 DeepSeek Key 时可以直接使用 Workers AI', async () => {
+  configureWorkersAI({ async run() { return { response: '{"ok":true}' }; } });
+  try {
+    await withFetch(async () => completion({}), async () => {
+      process.env.DEEPSEEK_API_KEY = '';
+      const result = await chatCompletion({ system: 's', user: 'u' });
+      assert.equal(JSON.parse(result.content).ok, true);
+    });
+  } finally {
+    configureWorkersAI(null);
+  }
 });
 
 test('未配置 Key 时快速失败', async () => {

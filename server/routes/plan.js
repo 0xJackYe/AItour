@@ -9,6 +9,7 @@ import { log } from '../lib/log.js';
 import { createRateLimiter } from '../lib/rateLimit.js';
 import { acceptsEventStream, openEventStream } from '../lib/sse.js';
 import { runPlanPipeline } from '../services/pipeline.js';
+import { hasWorkersAI } from '../services/workersAi.js';
 
 // 去掉控制字符，保留换行与制表符。
 const CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
@@ -38,8 +39,8 @@ export function createPlanRouter(config = getConfig()) {
       next(error);
       return;
     }
-    if (!getConfig().llm.apiKey) {
-      next(new AppError('CONFIG_MISSING', '未配置 DEEPSEEK_API_KEY', { status: 503 }));
+    if (!getConfig().llm.apiKey && !hasWorkersAI()) {
+      next(new AppError('CONFIG_MISSING', '未配置可用的大模型服务', { status: 503 }));
       return;
     }
     if (active >= config.plan.maxConcurrent) {

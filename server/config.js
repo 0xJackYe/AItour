@@ -31,8 +31,8 @@ export function getConfig(env = process.env) {
     },
     google: {
       apiKey: env.GOOGLE_MAPS_API_KEY || '',
-      // 浏览器端 Key 应单独创建并限制 HTTP Referrer；本地开发可与服务端共用。
-      browserKey: env.GOOGLE_MAPS_BROWSER_KEY || env.GOOGLE_MAPS_API_KEY || '',
+      // 生产环境绝不把服务端 Key 下发给浏览器；本地开发才允许共用。
+      browserKey: env.GOOGLE_MAPS_BROWSER_KEY || (!isProduction ? env.GOOGLE_MAPS_API_KEY || '' : ''),
       mapId: env.GOOGLE_MAP_ID || 'DEMO_MAP_ID',
       timeoutMs: intValue(env, 'GOOGLE_TIMEOUT_MS', 15000, { min: 1000 }),
       maxConcurrency: intValue(env, 'GOOGLE_MAX_CONCURRENCY', 8, { min: 1, max: 64 }),
