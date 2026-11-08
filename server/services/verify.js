@@ -2,7 +2,7 @@
 // 自审是增强项：失败时跳过而不是让整个请求失败；取消信号仍会向上抛出。
 
 import { getConfig } from '../config.js';
-import { currentSignal } from '../lib/context.js';
+import { currentContext, currentSignal } from '../lib/context.js';
 import { isAbortError } from '../lib/errors.js';
 import { log } from '../lib/log.js';
 import { requestJson } from './llm.js';
@@ -41,6 +41,10 @@ export function normalizeVerification(parsed) {
 
 export async function verifyPlan(userQuery, plan) {
   if (!getConfig().llm.apiKey && !hasWorkersAI()) return skippedVerification();
+  if ((currentContext()?.stats?.llm_fallback_calls || 0) > 0) {
+    log.info('verify.skipped', { reason: 'workers_ai_fallback' });
+    return skippedVerification();
+  }
   const userMessage = `【用户原始需求】\n${userQuery}\n\n【已生成的旅行计划】\n${JSON.stringify(planOutline(plan))}`;
   try {
     const parsed = await requestJson(VERIFY_SYSTEM_PROMPT, userMessage, {

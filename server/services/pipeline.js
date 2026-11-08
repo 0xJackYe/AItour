@@ -162,7 +162,8 @@ export async function runPlanPipeline(query, { onProgress = () => {} } = {}) {
   let regeneration = null;
 
   const groundingAvailable = isGoogleConfigured();
-  if (shouldRegenerate(best, groundingAvailable)) {
+  const usedWorkersAiFallback = (currentContext()?.stats?.llm_fallback_calls || 0) > 0;
+  if (!usedWorkersAiFallback && shouldRegenerate(best, groundingAvailable)) {
     progress('regenerate', '发现问题，正在根据校验结果自动修正…', 0);
     try {
       const feedback = buildRegenFeedback(best.verification, groundingIssues(best.geocoding));

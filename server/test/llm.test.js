@@ -322,6 +322,26 @@ test('未配置 DeepSeek Key 时可以直接使用 Workers AI', async () => {
   }
 });
 
+test('Workers AI 后备模式跳过可选细化，避免一次请求内重复慢推理', async () => {
+  let fallbackCalls = 0;
+  configureWorkersAI({
+    async run() {
+      fallbackCalls++;
+      return { response: JSON.stringify(tokyoPlan(1)) };
+    },
+  });
+  try {
+    await withFetch(async () => new Response('insufficient balance', { status: 402 }), async () => {
+      const result = await runWithContext({ stats: {}, signal: null }, () => callLLM('东京一日游'));
+      assert.equal(result.status, 'success');
+      assert.equal(result.plan.daily_plans.length, 1);
+      assert.equal(fallbackCalls, 1);
+    });
+  } finally {
+    configureWorkersAI(null);
+  }
+});
+
 test('未配置 Key 时快速失败', async () => {
   await withFetch(async () => completion({}), async () => {
     process.env.DEEPSEEK_API_KEY = '';

@@ -9,7 +9,7 @@
 
 import { AppError, isAbortError } from '../lib/errors.js';
 import { createDeadline, mapWithConcurrency, parseRetryAfter, withRetry } from '../lib/async.js';
-import { currentSignal, recordStat } from '../lib/context.js';
+import { currentContext, currentSignal, recordStat } from '../lib/context.js';
 import { log } from '../lib/log.js';
 import { getConfig } from '../config.js';
 import { analyzeDays, analyzeQuery } from './intent.js';
@@ -761,8 +761,13 @@ export async function callLLM(userMessage, feedback = null, { intent = analyzeQu
       result = { ...(await generateLongPlan(userMessage, { intent, feedback, onProgress })), strategy: 'chunked-fallback' };
     }
   }
-  if (result.status === 'success' && result.plan) {
+  const usedWorkersAiFallback = (currentContext()?.stats?.llm_fallback_calls || 0) > 0;
+  if (result.status === 'success' && result.plan && !usedWorkersAiFallback) {
     result.plan = await enrichThinDays(userMessage, result.plan, { onProgress });
+  } else if (result.status === 'success' && result.plan && usedWorkersAiFallback) {
+    // Workers AI 在免费 Worker 上一次推理通常需要约 20–30 秒；再做可选细化会超过
+    // HTTP 请求的生命周期。保留首轮完整计划，把剩余时间留给 Google 地图落地与路线。
+    log.info('llm.enrich_skipped', { reason: 'workers_ai_fallback' });
   }
   return result;
 }
