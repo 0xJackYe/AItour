@@ -4,7 +4,8 @@ import { openDB } from 'idb';
 import { normalizeResult, planTitle } from '../lib/plan.js';
 
 const DB_NAME = 'aitour';
-const DB_VERSION = 1;
+// 旧版线上站点已经创建过 v2 数据库；版本号只能递增，回退会触发 VersionError。
+const DB_VERSION = 2;
 const STORE_NAME = 'plans';
 const MAX_HISTORY = 30;
 
