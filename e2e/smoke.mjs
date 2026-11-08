@@ -163,7 +163,7 @@ test('桌面端：示例 → 实时进度 → 行程、地图、历史、按天�
     // 复制：剪贴板中是去掉 Markdown 标记、可直接粘贴的完整行程。
     await page.getByRole('button', { name: '复制行程文字' }).click();
     await page.getByRole('status').filter({ hasText: '已复制' }).waitFor();
-    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    const copied = (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n?/g, '\n');
     assert.match(copied, /^【京都3日游】/);
     assert.match(copied, /【第 3 天 · 京都第3天】/);
     assert.match(copied, /1\. 09:30 /);
@@ -273,7 +273,7 @@ test('多城市：路线卡片、城市间交通、总览 / 城市 / 某一天�
     // 复制的文字版包含城市间交通。
     await page.getByRole('button', { name: '复制行程文字' }).click();
     await page.getByRole('status').filter({ hasText: '已复制' }).waitFor();
-    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    const copied = (await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n?/g, '\n');
     assert.match(copied, /【城市间交通】\n\n- 第 4 天 · 札幌 → 函馆：JR 特急北斗号/);
     assert.deepEqual(errors, []);
   } finally {
